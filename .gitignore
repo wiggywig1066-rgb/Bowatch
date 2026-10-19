@@ -1,0 +1,4 @@
+data/pos.csv
+*.pos.csv
+node_modules/
+tools/screenshot-*.png
