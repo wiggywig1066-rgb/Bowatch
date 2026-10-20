@@ -1,3 +1,3 @@
-date,hour,tickets,net_sales,biscuits,chicken_pieces,supremes,channel_drive_thru,channel_lobby,channel_doordash,channel_ubereats,channel_grubhub,channel_app,labor_hours,notes
+date,hour,tickets,net_sales,biscuits,chicken_pieces,tenders,channel_drive_thru,channel_lobby,channel_doordash,channel_ubereats,channel_grubhub,channel_app,labor_hours,notes
 2026-10-12,5,9,71.40,14,2,0,8,0,0,0,0,1,4.0,EXAMPLE ROW - delete
 2026-10-12,6,38,342.10,51,6,2,33,2,1,0,0,2,4.0,EXAMPLE ROW - delete

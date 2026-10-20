@@ -25,7 +25,7 @@ const CHANNELS = [
   ["Bojangles app · curbside · Google Ordering","Official channels","Store hours","Order-ahead and curbside skip the speaker but not the fryer."],
   ["ezCater catering","4.8 · $50 minimum","Mon–Sat 5 AM–9 PM · Sun 6:30 AM–9 PM","Office breakfast trays and group lunches, 18-hour change window."]];
 
-const state = { now: new Date(), sel: null, selHour: null, role: localStorage.getItem(ROLE_KEY) || "cook", calJson: null, cal: null, pos: null, posSource: null, posError: null, weather: null, fc: null, fcKey: "", bt: null };
+const state = { now: new Date(), sel: null, selHour: null, role: localStorage.getItem(ROLE_KEY) || "cook", calJson: null, menu: null, cal: null, pos: null, posSource: null, posError: null, weather: null, fc: null, fcKey: "", bt: null };
 
 function compute() {
   const c = chicagoNow(state.now), key = `${c.dateKey}|${c.hour}|${state.pos?.last}|${state.weather?.fetchedAt}|${state.calJson?.updated}`;
@@ -45,14 +45,14 @@ function hero(fc) {
     <div class="card dark"><p class="label">${esc(title)}</p><div class="big" style="margin-top:8px">${L.biscuits}</div><p style="margin:4px 0 0">biscuits</p>
       <p class="small" style="margin:8px 0 0;opacity:.8">${L.pansPerDrop === 0 ? "Hold the board" : `${L.pansPerDrop} pan${L.pansPerDrop === 1 ? "" : "s"} / 20 min`} · ${esc(focus.label)}</p>
       <p class="small" style="margin:6px 0 0;opacity:.7">${esc(L.dropNote)}</p></div>
-    <div class="card"><p class="label">Chicken</p><div class="mid" style="margin-top:8px">${L.chicken} pcs</div><p class="small muted">${L.eightPiece} eight-piece · ${L.supremes} supremes</p></div>
+    <div class="card"><p class="label">Chicken</p><div class="mid" style="margin-top:8px">${L.chicken} pcs</div><p class="small muted">${L.eightPiece} eight-piece · ${L.tenders} Bo’s Tenders</p></div>
     <div class="card"><p class="label">Next hour</p><div class="mid" style="margin-top:8px">${N && N.open ? `${N.biscuits}` : "—"}</div><p class="small muted">${N && N.open ? `biscuits · ${N.crew} crew` : "Clock out the line"}</p></div>
     <div class="card"><p class="label">On the floor</p><div class="mid" style="margin-top:8px">${L.crew}</div><p class="small muted">${esc(L.roles.join(", "))}</p></div>
   </section>`;
 }
 
 function itemsGrid(L) {
-  const it = [["Bone-in", `${L.chicken} pcs`], ["Supremes", L.supremes], ["Filet / sausage / ham", L.breakfastProteins], ["Fries", L.fries], ["Sides", L.sides], ["Gravy", L.gravy], ["Bo-rounds", L.boRounds], ["Tea", `${L.teaGallons} gal`]];
+  const it = [["Bone-in", `${L.chicken} pcs`], ["Bo’s Tenders", L.tenders], ["Filet / sausage / ham / steak", L.breakfastProteins], ["Bo Fries", L.fries], ["Fixins", L.sides], ["Gravy", L.gravy], ["Bo-Tato Rounds", L.boRounds], ["Legendary tea", `${L.teaGallons} gal`]];
   return `<div class="items">${it.map(([a, b]) => `<div><span>${a}</span><b>${b}</b></div>`).join("")}</div>`;
 }
 
@@ -74,7 +74,7 @@ function roleView(fc, day, hourX) {
       <p>${L.roles.map(r => `<span class="pill">${esc(r)}</span>`).join(" ")}</p>
       ${N && N.crew < L.crew ? `<p class="small" style="opacity:.8">You can drop to ${N.crew} at ${hourLabel(nx.hour)}.</p>` : ""}${N && N.crew > L.crew ? `<p class="small">Add ${N.crew - L.crew} before ${hourLabel(nx.hour)}.</p>` : ""}</div>
       <div class="card"><p class="label">Don’t 86</p><h3>Hold this through ${hourLabel((hourX.hour + 1) % 24)}</h3><div style="margin-top:10px">
-      ${[["Biscuits", `${L.biscuitLow}–${L.biscuitHigh}`], ["Bone-in chicken", `${L.chicken} pcs · about ${L.eightPiece} eight-piece`], ["Supremes", L.supremes], ...(L.breakfastProteins > 0 ? [["Filet, sausage, ham", L.breakfastProteins]] : []), ["Mac, dirty rice, mashed", `${L.sides} sides`], ["Seasoned fries", L.fries], ["Gravy", L.gravy], ["Bo-rounds", L.boRounds], ["Iced tea", `${L.teaGallons} gal`]].map(([a, b]) => `<div class="row"><span>${a}</span><b>${b}</b></div>`).join("")}</div>
+      ${[["Biscuits", `${L.biscuitLow}–${L.biscuitHigh}`], ["Bone-in chicken", `${L.chicken} pcs · about ${L.eightPiece} eight-piece`], ["Bo’s Chicken Tenders", L.tenders], ...(L.breakfastProteins > 0 ? [["Cajun filet, sausage, country ham, steak", L.breakfastProteins]] : []), ["Mac, dirty rice, mashed & other fixins", `${L.sides} sides`], ["Bo Fries", L.fries], ["Gravy", L.gravy], ["Bo-Tato Rounds", L.boRounds], ["Legendary Iced Tea", `${L.teaGallons} gal`]].map(([a, b]) => `<div class="row"><span>${a}</span><b>${b}</b></div>`).join("")}</div>
       ${L.appLoad >= 4 ? `<p class="small" style="color:var(--cayenne)">Apps are on this fryer. Bag the 8- and 12-piece before you work the lane.</p>` : ""}
       <p class="xs faint">A normal dinner is already a full floor. Call-in days are the ones that jump past that — game nights, church let-out, a packed Saturday.</p></div></div>`;
   } else {
@@ -133,7 +133,7 @@ function posSection(fc) {
   const p = state.pos, L = fc.learned, bt = state.bt;
   const fmt = o => Object.entries(o).map(([k, v]) => `${k} ${(v.mape * 100).toFixed(0)}% (${v.n} h)`).join(" · ") || "—";
   return `<section id="pos"><p class="label">Calibrate</p><h2>Load real POS history</h2>
-    <div class="card"><p class="small">Export hourly sales from the POS as a CSV with the template header (one row per date + hour). The board then uses the median of the last 8 same-weekdays for each hour, learns biscuits / chicken / supremes per ticket by daypart, and reads the app share from the channel columns.</p>
+    <div class="card"><p class="small">Export hourly sales from the POS as a CSV with the template header (one row per date + hour). The board then uses the median of the last 8 same-weekdays for each hour, learns biscuits / chicken / tenders per ticket by daypart (an older <code>supremes</code> column is read as tenders), and reads the app share from the channel columns.</p>
     <p class="small muted">The file stays in this browser (saved in local storage on this device). It is not uploaded anywhere.</p>
     <p><input type="file" id="posfile" accept=".csv,text/csv"> <a class="btn ghost" href="data/pos_template.csv" download>Download template</a> ${p ? `<button class="btn ghost" id="posclear">Remove POS data</button>` : ""}</p>
     ${state.posError ? `<p class="small" style="color:var(--cayenne)">Couldn’t read that file: ${esc(state.posError)}</p>` : ""}
@@ -161,6 +161,7 @@ function sources() {
       ["Dated events", "Chelsea Hornets football (MaxPreps), Auburn and Alabama 2026 schedules, City of Chelsea calendar, US public holidays. See the Calendar section for each link."],
       ["Weekly rhythm", "US-280 commute windows, Sunday church let-out, Wednesday church, Friday payday, Walmart Saturday, app delivery windows — carried over from the original board. Used only until POS data replaces them."],
       ["Line production model", "16 biscuits to a pan, ~48 to a batch, oven every 20 minutes. Item counts scale from tickets by daypart; crew roles follow the original board's thresholds."],
+      ["Menu tracked", `${state.menu ? `Menu checked ${esc(state.menu.checkedAt)} against ${esc(state.menu.scope || "the Chelsea store menu")}. Board items: ${esc((state.menu.tracked || []).map(t => t.board).join(", "))}. This store sells no Chicken Supremes; its boneless chicken is Bo’s Chicken Tenders and Bo Bites. ${(state.menu.sources || []).map((s, i) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">source ${i + 1}</a>`).join(" · ")}` : "data/menu.json not loaded."}`],
       ["Bojangles location page & franchise FDD", "Hours (Mon–Sat 5 AM–10 PM, Sun 6 AM–10 PM), 79% drive-thru/carry-out, day-part sales mix."]]
       .map(([a, b]) => `<div class="card"><b style="font-weight:500">${a}</b><p class="small muted" style="margin-bottom:0">${b}</p></div>`).join("")}</div></section>`;
 }
@@ -208,6 +209,7 @@ async function loadWeather() {
 }
 
 async function boot() {
+  try { const r = await fetch("data/menu.json", { cache: "no-cache" }); state.menu = await r.json(); } catch (e) { console.warn("menu.json failed to load", e); state.menu = null; }
   try { const r = await fetch("data/events.json", { cache: "no-cache" }); state.calJson = await r.json(); }
   catch (e) { console.warn("events.json failed to load", e); state.calJson = {}; }
   state.cal = makeCalendar(state.calJson);

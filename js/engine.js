@@ -58,19 +58,23 @@ const WEEKLY = [
   { days:[1,2,3,4,5], s:8, e:10, delta:2, app:2, kind:"delivery", label:"ezCater / office breakfast trays", detail:"Weekday office trays hit the biscuit line, not the 280 lane." },
 ];
 
-// Per-ticket item ratios by daypart (original app). Biscuits, chicken and supremes are replaced by
+// Per-ticket item ratios by daypart (original app). Biscuits, chicken and tenders are replaced by
 // POS-learned ratios when a POS file with those columns is loaded.
+// Menu check 2026-10-20 (data/menu.json): the Chelsea store does not sell Chicken Supremes. Its boneless
+// line is Bo's Chicken Tenders (plus Bo Bites). The old "supremes" per-ticket share is carried over
+// unchanged as "tenders" -- an ESTIMATE, not measured at this store. A POS "tenders" column replaces it.
+// boRounds = Bo-Tato Rounds, fries = Bo Fries, teaOz = Legendary Iced Tea, sides = the other fixins.
 const DEFAULT_RATIOS = {
-  breakfast:{biscuits:1.35,chicken:0.3,supremes:0.1,breakfastProteins:0.55,fries:0.18,boRounds:0.04,sides:0.12,gravy:0.28,teaOz:6},
-  lunch:{biscuits:0.95,chicken:2,supremes:0.5,breakfastProteins:0.06,fries:0.7,boRounds:0.12,sides:0.32,gravy:0.05,teaOz:12},
-  afternoon:{biscuits:0.8,chicken:1.4,supremes:0.35,breakfastProteins:0.04,fries:0.5,boRounds:0.08,sides:0.22,gravy:0.04,teaOz:8},
-  dinner:{biscuits:1.1,chicken:2.6,supremes:0.55,breakfastProteins:0.02,fries:0.8,boRounds:0.16,sides:0.65,gravy:0.06,teaOz:12},
-  late:{biscuits:0.7,chicken:1.6,supremes:0.4,breakfastProteins:0,fries:0.55,boRounds:0.1,sides:0.28,gravy:0.03,teaOz:8}};
+  breakfast:{biscuits:1.35,chicken:0.3,tenders:0.1,breakfastProteins:0.55,fries:0.18,boRounds:0.04,sides:0.12,gravy:0.28,teaOz:6},
+  lunch:{biscuits:0.95,chicken:2,tenders:0.5,breakfastProteins:0.06,fries:0.7,boRounds:0.12,sides:0.32,gravy:0.05,teaOz:12},
+  afternoon:{biscuits:0.8,chicken:1.4,tenders:0.35,breakfastProteins:0.04,fries:0.5,boRounds:0.08,sides:0.22,gravy:0.04,teaOz:8},
+  dinner:{biscuits:1.1,chicken:2.6,tenders:0.55,breakfastProteins:0.02,fries:0.8,boRounds:0.16,sides:0.65,gravy:0.06,teaOz:12},
+  late:{biscuits:0.7,chicken:1.6,tenders:0.4,breakfastProteins:0,fries:0.55,boRounds:0.1,sides:0.28,gravy:0.03,teaOz:8}};
 export const partOf = h => h < 11 ? "breakfast" : h < 14 ? "lunch" : h < 17 ? "afternoon" : h < 20 ? "dinner" : "late";
 
 export const DAYPARTS = [
-  { id:"open", name:"Open", start:5, end:11, note:"Biscuit maker at the door. Filets and gravy before the 7:35 bell." },
-  { id:"lunch", name:"Lunch", start:11, end:14, note:"Bone-in and supremes. Dashers are in the lot 11–2." },
+  { id:"open", name:"Open", start:5, end:11, note:"Biscuit maker at the door. Cajun filets and gravy before the 7:35 bell." },
+  { id:"lunch", name:"Lunch", start:11, end:14, note:"Bone-in and Bo's Tenders. Dashers are in the lot 11–2." },
   { id:"afternoon", name:"Afternoon", start:14, end:17, note:"Cut a person. Do not fry the dinner drop at 2." },
   { id:"dinner", name:"Dinner", start:17, end:20, note:"Family meals and app bags. Mac and dirty rice before 5, not at 5." },
   { id:"close", name:"Close", start:20, end:22, note:"Last biscuit drop around 9. Lobby is already dark." }];
@@ -113,7 +117,7 @@ function splitCSVLine(line) {
   }
   out.push(cur); return out.map(s => s.trim());
 }
-const NUM_COLS = ["tickets","net_sales","biscuits","chicken_pieces","supremes","channel_drive_thru","channel_lobby","channel_doordash","channel_ubereats","channel_grubhub","channel_app","labor_hours"];
+const NUM_COLS = ["tickets","net_sales","biscuits","chicken_pieces","tenders","channel_drive_thru","channel_lobby","channel_doordash","channel_ubereats","channel_grubhub","channel_app","labor_hours"];
 export function parsePOS(text) {
   const lines = String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) throw new Error("CSV has no data rows.");
@@ -129,6 +133,8 @@ export function parsePOS(text) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !(hour >= 0 && hour <= 23)) { bad.push(i + 2); return; }
     if (/^EXAMPLE/i.test(o.notes || "")) return;
     const r = { date, hour, notes: o.notes || "" };
+    // Older exports used a "supremes" column; read it as tenders (the store's boneless line) when no tenders column is present.
+    if (o.tenders == null && o.supremes != null) o.tenders = o.supremes;
     for (const c of NUM_COLS) r[c] = o[c] === "" || o[c] == null ? null : Number(o[c]);
     if (r.tickets == null || Number.isNaN(r.tickets)) { bad.push(i + 2); return; }
     rows.push(r);
@@ -158,12 +164,12 @@ export function learnFromPOS(pos, { asOf, weeks = 8, excludeDates = new Set() })
     if (!r.tickets) continue; const a = acc[p];
     if (r.biscuits != null) { a.b += r.biscuits; a.bn += r.tickets; }
     if (r.chicken_pieces != null) { a.c += r.chicken_pieces; a.cn += r.tickets; }
-    if (r.supremes != null) { a.s += r.supremes; a.sn += r.tickets; } }
+    if (r.tenders != null) { a.s += r.tenders; a.sn += r.tickets; } }
   const ratios = structuredClone(DEFAULT_RATIOS), learned = [];
   for (const [p, a] of Object.entries(acc)) {
     if (a.bn >= 200) { ratios[p].biscuits = a.b / a.bn; learned.push(`${p} biscuits`); }
     if (a.cn >= 200) { ratios[p].chicken = a.c / a.cn; learned.push(`${p} chicken`); }
-    if (a.sn >= 200) { ratios[p].supremes = a.s / a.sn; learned.push(`${p} supremes`); }
+    if (a.sn >= 200) { ratios[p].tenders = a.s / a.sn; learned.push(`${p} tenders`); }
   }
   // Scale factor so cells with too few samples fall back to the curve shape at this store's volume.
   let num = 0, den = 0;
@@ -332,7 +338,7 @@ function crewFor(x) {
 }
 export function line(x, ratios = DEFAULT_RATIOS, wide = false) {
   const part = partOf(x.hour);
-  if (!x.open) return { hour:x.hour, open:false, tickets:0, biscuits:0, biscuitLow:0, biscuitHigh:0, pansPerDrop:0, dropNote:"Kitchen is dark.", chicken:0, supremes:0, breakfastProteins:0, fries:0, boRounds:0, sides:0, gravy:0, teaGallons:0, eightPiece:0, crew:0, roles:[], appLoad:0, part };
+  if (!x.open) return { hour:x.hour, open:false, tickets:0, biscuits:0, biscuitLow:0, biscuitHigh:0, pansPerDrop:0, dropNote:"Kitchen is dark.", chicken:0, tenders:0, breakfastProteins:0, fries:0, boRounds:0, sides:0, gravy:0, teaGallons:0, eightPiece:0, crew:0, roles:[], appLoad:0, part };
   const n = ratios[part], t = x.tickets;
   let bm = 1, cm = 1, sm = 1;
   if (x.appLoad >= 8) { bm = 1.08; cm = 1.18; sm = 1.2; } else if (x.appLoad >= 4) { bm = 1.05; cm = 1.1; sm = 1.1; }
@@ -342,7 +348,7 @@ export function line(x, ratios = DEFAULT_RATIOS, wide = false) {
   const roles = crewFor({ biscuits, chicken, tickets: Math.round(t), score: x.score, hour: x.hour, appLoad: x.appLoad });
   const tea = Math.round(t * n.teaOz / 128 * 2) / 2, spread = wide ? 0.25 : 0.15;
   return { hour:x.hour, open:true, part, tickets: round5(t), biscuits, biscuitLow: round5(b * (1 - spread)), biscuitHigh: round5(b * (1 + spread)), ...p,
-    chicken, supremes: round5(t * n.supremes), breakfastProteins: round5(t * n.breakfastProteins), fries: round5(t * n.fries), boRounds: round5(t * n.boRounds),
+    chicken, tenders: round5(t * (n.tenders ?? 0)), breakfastProteins: round5(t * n.breakfastProteins), fries: round5(t * n.fries), boRounds: round5(t * n.boRounds),
     sides: round5(t * n.sides * sm), gravy: round5(t * n.gravy), teaGallons: tea > 0 ? Math.max(0.5, tea) : 0, eightPiece: Math.max(1, Math.round(chicken / 8)),
     crew: roles.length, roles, appLoad: x.appLoad };
 }

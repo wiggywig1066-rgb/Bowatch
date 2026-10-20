@@ -1,0 +1,36 @@
+{
+  "checkedAt": "2026-10-20",
+  "store": "Bojangles, 15392 US-280, Chelsea, AL 35043",
+  "scope": "the Chelsea store's Postmates/Uber Eats menu (15392 Hwy 280) plus the national bojangles.com menu",
+  "notes": [
+    "No Chicken Supremes at this store (owner confirmed; not on the store's delivery menu). Boneless chicken is Bo's Chicken Tenders and Bo Bites.",
+    "Bojangles says Bo's Chicken Tenders are the hand-breaded evolution of Supremes; some legacy-franchise menus (e.g. Tri-Arc NC/VA) still list Supremes.",
+    "The national bojangles.com menu still lists Mashed Potatoes & Gravy, Cajun Pintos and Green Beans; the Chelsea delivery menu lists them too.",
+    "The board's tenders per-ticket ratio is the old Supremes estimate carried over until POS data with a tenders column is loaded."
+  ],
+  "tracked": [
+    {"key": "chicken", "board": "Bone-in chicken", "menu": ["8pc / 12pc / 20pc Chicken Meals", "8pc Chicken Box", "8pc Dark Chicken Meal (digital)", "2pc Leg & Thigh", "3pc Leg & 2 Thighs", "2pc Breast & Wing", "3 Wings", "Chicken Leg Kids' Meal"]},
+    {"key": "tenders", "board": "Bo's Chicken Tenders", "menu": ["Bo's Chicken Tenders Combo", "12pc Bo's Chicken Tenders Meal", "12pc 4 Chicken & 8 Bo's Chicken Tenders Meal", "20pc 8 Chicken & 12 Bo's Chicken Tenders Meal", "2pc Bo's Chicken Tenders Kids' Meal", "Bo Bites Combo / Snack / Platter", "4pc Bo Bites Kid's Meal"]},
+    {"key": "biscuits", "board": "Biscuits", "menu": ["Plain Biscuit", "Bo-Berry Biscuit", "every biscuit sandwich and meal biscuit"]},
+    {"key": "breakfastProteins", "board": "Cajun filet / sausage / country ham / steak", "menu": ["Cajun Filet Biscuit", "Sausage Biscuit", "Sausage & Egg Biscuit", "Sausage Egg & Cheese Biscuit", "Sausage Bo-Berry Biscuit", "Bacon, Egg & Cheese Biscuit", "Egg & Cheese Biscuit", "Country Ham Biscuit", "Steak Biscuit", "Pork Chop Griller Biscuit (limited time)"]},
+    {"key": "gravy", "board": "Gravy", "menu": ["Southern Gravy Biscuit", "Mashed Potatoes & Gravy"]},
+    {"key": "fries", "board": "Bo Fries", "menu": ["Bo Fries"]},
+    {"key": "boRounds", "board": "Bo-Tato Rounds", "menu": ["Bo-Tato Rounds"]},
+    {"key": "sides", "board": "Fixins (mac, dirty rice, mashed, pintos, green beans, slaw)", "menu": ["Macaroni & Cheese", "Bojangles Dirty Rice", "Mashed Potatoes & Gravy", "Bojangles Cajun Pintos", "Green Beans", "Cole Slaw"]},
+    {"key": "teaOz", "board": "Legendary Iced Tea", "menu": ["Legendary Iced Tea Sweet", "Legendary Iced Tea Unsweet", "Peach Iced Tea Sweet / Unsweet"]}
+  ],
+  "notTracked": [
+    "Bo's Chicken Sandwich", "Grilled Chicken Sandwich", "Bo's Salad (10:30 AM to close)",
+    "Bo-Berry Cookie", "Sweet Potato Pie", "French Vanilla / Chocolate / Bo-Berry Milkshakes",
+    "Iced Coffee (regular, vanilla, caramel, Cinnamon Toast Crunch)", "Premium Coffee", "Premium Lemonade", "Pepsi fountain drinks", "Simply Orange",
+    "Limited time: 2 Steak Biscuits, Boojangles Bite Box, Donut Bites, Pork Chop Griller Biscuit"
+  ],
+  "notSold": ["Chicken Supremes"],
+  "sources": [
+    {"label": "Chelsea store menu on Postmates (15392 Hwy 280)", "url": "https://postmates.com/brand-city/chelsea-al/bojangles-famous-chicken"},
+    {"label": "bojangles.com national menu", "url": "https://www.bojangles.com/menu"},
+    {"label": "Chelsea location page", "url": "https://locations.bojangles.com/al/chelsea/15392-us-280-868.html"},
+    {"label": "KC Insiders: Bojangles on Supremes vs Bo's Chicken Tenders (Sep 2026)", "url": "https://kcinsiders.substack.com/p/your-overland-park-bojangles-update"},
+    {"label": "QSR Magazine: Bo's Chicken Tenders on the new-market menu", "url": "https://www.qsrmagazine.com/food/menu-innovations/ready-to-grow-again-bojangles-is-going-all-in-on-experience/"}
+  ]
+}
