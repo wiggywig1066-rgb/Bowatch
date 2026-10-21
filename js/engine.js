@@ -1,12 +1,17 @@
 // Bo Watch forecast engine. Plain ES module, no dependencies. Runs in the browser and in Node 18+.
 //
-// Two modes:
+// Three modes:
 //   "estimate"  No POS history loaded. Uses the original app's hand-drawn weekday curves plus the
 //               same additive rules (280 rush, church, apps, payday). Numbers are estimates.
 //   "pos"       A POS CSV is loaded. Baseline = median tickets for the same weekday + hour over the
 //               last 8 weeks. Item ratios and app share are learned from the same file. Only things a
 //               weekday median cannot know (events, weather, no-school days, holidays, 1st of month)
 //               are layered on top as multipliers.
+//   "daily"     Only a DAILY sales CSV is loaded. Each weekday's day total = median of the last 8 same
+//               weekdays; it is split across hours with the default hourly curve. Hourly POS, when
+//               present, takes priority for the hourly shape.
+// With any sales data, uplift factors for special-day kinds (holiday, sports, no-school...) and a rain
+// effect are learned from day totals when enough comparable days exist; otherwise defaults stay.
 
 export const TZ = "America/Chicago";
 export const STORE = {
@@ -179,23 +184,181 @@ export function learnFromPOS(pos, { asOf, weeks = 8, excludeDates = new Set() })
   return { base, samples, appShare, ratios, learnedRatios: learned, curveScale, filledCells: filled, weeks };
 }
 
+// ---------------- daily sales ----------------
+// Daily CSV: date,tickets,net_sales,notes (+ optional biscuits,chicken_pieces,tenders,labor_hours).
+const DAILY_NUM = ["tickets","net_sales","biscuits","chicken_pieces","tenders","labor_hours"];
+export function parseDaily(text) {
+  const lines = String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) throw new Error("CSV has no data rows.");
+  const cols = splitCSVLine(lines[0]).map(c => c.toLowerCase());
+  if (cols.includes("hour")) throw new Error("This file has an hour column — it's an hourly export. Use the hourly POS upload instead.");
+  for (const need of ["date","tickets"]) if (!cols.includes(need)) throw new Error(`Missing column "${need}". Use the daily_template.csv header.`);
+  const rows = [], bad = [], seen = new Map();
+  lines.slice(1).forEach((l, i) => {
+    const v = splitCSVLine(l), o = {};
+    cols.forEach((c, j) => { o[c] = v[j] ?? ""; });
+    let date = o.date;
+    const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(date); if (us) date = `${us[3]}-${pad(us[1])}-${pad(us[2])}`;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { bad.push(i + 2); return; }
+    if (/^EXAMPLE/i.test(o.notes || "")) return;
+    const r = { date, notes: o.notes || "" };
+    if (o.tenders == null && o.supremes != null) o.tenders = o.supremes;
+    for (const c of DAILY_NUM) { const s = String(o[c] ?? "").replace(/[$,]/g, ""); r[c] = s === "" ? null : Number(s); }
+    if (r.tickets == null || Number.isNaN(r.tickets) || r.tickets < 0) { bad.push(i + 2); return; }
+    if (seen.has(date)) rows[seen.get(date)] = r; else { seen.set(date, rows.length); rows.push(r); } // last row for a date wins
+  });
+  if (!rows.length) throw new Error("No usable rows (need date as YYYY-MM-DD or M/D/YYYY, and tickets).");
+  rows.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const cols2 = DAILY_NUM.filter(c => c !== "tickets" && rows.some(r => r[c] != null));
+  return { rows, badLines: bad, first: rows[0].date, last: rows[rows.length - 1].date, days: rows.length, columns: cols2 };
+}
+
+// One map of date -> day totals. Daily file wins; hourly POS days with 10+ hours fill the rest.
+export function dailyTotals(daily, pos) {
+  const m = new Map();
+  if (pos) { const by = new Map();
+    for (const r of pos.rows) { const a = by.get(r.date) || { date:r.date, tickets:0, hours:0, src:"hourly" }; a.tickets += r.tickets; a.hours++; by.set(r.date, a); }
+    for (const [k, a] of by) if (a.hours >= 10) m.set(k, a); }
+  if (daily) for (const r of daily.rows) m.set(r.date, { ...r, src:"daily" });
+  return m;
+}
+function excludedDates(cal) {
+  const s = new Set(cal.events.map(e => e.date));
+  for (const k of cal.closedSchoolDays || []) s.add(k);
+  return s;
+}
+// Kinds of special day a date is, for uplift learning: event kinds + "noschool" (listed closure on a weekday).
+export function dayKinds(k, cal) {
+  const s = new Set(cal.eventsOn(k).filter(e => !e.closed && e.lift != null).map(e => e.kind || "local"));
+  const d = dow(k); if (d >= 1 && d <= 5 && cal.closedSchoolDays?.has(k)) s.add("noschool");
+  return s;
+}
+function weekdayMedian(totals, k, weeks, excl) {
+  const d = dow(k), v = [];
+  for (let w = 1; w <= weeks; w++) { const t = totals.get(addDays(k, -7 * w)); if (t && t.tickets > 0 && !excl.has(t.date)) v.push(t.tickets); }
+  return { med: v.length >= 3 ? median(v) : null, n: v.length, d };
+}
+
+// Baseline day total per weekday = median of the last `weeks` same weekdays before asOf (special days left out).
+export function learnDaily(totals, { asOf, weeks = 8, cal }) {
+  const excl = excludedDates(cal), cutoff = addDays(asOf, -7 * weeks), vals = Array.from({ length: 7 }, () => []);
+  for (const [k, t] of totals) if (k >= cutoff && k < asOf && !excl.has(k) && t.tickets > 0) vals[dow(k)].push(t.tickets);
+  const samples = vals.map(v => v.length), med = vals.map(v => v.length >= 3 ? median(v) : null);
+  const filled = med.map((v, d) => v == null ? null : v / dayShape(d).sum).filter(v => v != null);
+  if (filled.length < 3) return null; // need 3+ weekdays with 3+ samples each
+  const scale = median(filled);
+  const base = med.map((v, d) => v ?? dayShape(d).sum * scale);
+  return { base, samples, scale, weeks, filledWeekdays: filled.length, asOf };
+}
+
+// Per-ticket item ratios from daily columns: scale the default daypart ratios so the day matches.
+export function learnDailyRatios(daily, minDays = 7) {
+  const ratios = structuredClone(DEFAULT_RATIOS), learned = [], info = {};
+  const implied = (d, item) => { const s = dayShape(d); let n = 0; s.arr.forEach((v, h) => { n += v * (DEFAULT_RATIOS[partOf(h)][item] ?? 0); }); return s.sum ? n / s.sum : 0; };
+  for (const [col, item] of [["biscuits","biscuits"], ["chicken_pieces","chicken"], ["tenders","tenders"]]) {
+    const rows = daily.rows.filter(r => r[col] != null && r.tickets > 0);
+    if (rows.length < minDays) continue;
+    const act = rows.reduce((s, r) => s + r[col], 0), exp = rows.reduce((s, r) => s + r.tickets * implied(dow(r.date), item), 0);
+    if (!exp) continue;
+    const k = clamp(act / exp, 0.3, 3);
+    for (const p of Object.keys(ratios)) ratios[p][item] *= k;
+    info[item] = { factor: k, days: rows.length }; learned.push(`${item} ×${k.toFixed(2)} (${rows.length} days)`);
+  }
+  const lab = daily.rows.filter(r => r.labor_hours > 0 && r.tickets > 0);
+  const tplh = lab.length >= minDays ? median(lab.map(r => r.tickets / r.labor_hours)) : null;
+  return { ratios, learned, info, ticketsPerLaborHour: tplh, laborDays: lab.length };
+}
+
+// What the default hourly lifts imply for a whole day, per kind (shape-weighted).
+function defaultKindLift(k, kind, cal) {
+  const d = dow(k), s = dayShape(d, cal.isSchoolDay(k)); let num = 0;
+  for (let h = 0; h < 24; h++) { if (!s.arr[h]) continue; let f = 1;
+    if (kind === "noschool") { if (h >= 9 && h < 15) f *= 1.10; if (h >= 6 && h < 8) f *= 0.95; }
+    else for (const e of cal.eventsOn(k)) if ((e.kind || "local") === kind && !e.closed && h >= e.start && h < e.end) f *= e.lift;
+    num += s.arr[h] * f; }
+  return s.sum ? num / s.sum : 1;
+}
+export const UPLIFT_MIN_DAYS = 3;
+// For each special-day kind: median of (actual / same-weekday median) / (what the default lifts predicted).
+// Learned only with UPLIFT_MIN_DAYS+ comparable days; otherwise the default lifts stay.
+export function learnUplifts(totals, cal, { asOf, weeks = 8, minDays = UPLIFT_MIN_DAYS } = {}) {
+  const excl = excludedDates(cal), acc = {};
+  for (const [k, t] of totals) {
+    if (k >= asOf || !(t.tickets > 0)) continue;
+    const kinds = dayKinds(k, cal); if (!kinds.size) continue;
+    const { med } = weekdayMedian(totals, k, weeks, excl); if (!med) continue;
+    let def = 1; for (const kind of kinds) def *= defaultKindLift(k, kind, cal);
+    const r = t.tickets / med / def;
+    for (const kind of kinds) (acc[kind] ??= []).push({ date: k, r, observed: t.tickets / med });
+  }
+  const factors = {};
+  for (const [kind, v] of Object.entries(acc)) {
+    const f = clamp(median(v.map(x => x.r)), 0.5, 1.6);
+    factors[kind] = { kind, n: v.length, factor: f, learned: v.length >= minDays, dates: v.map(x => x.date), observed: median(v.map(x => x.observed)) };
+  }
+  return { factors, minDays };
+}
+
+// Rain sensitivity from past daily weather. Learned only if there are enough wet and dry days and the
+// difference is clear (Welch t >= 2 on log residuals, effect >= 3%). Otherwise skipped with a reason.
+export function learnWeather(totals, wxHist, cal, { asOf, weeks = 8, minWet = 6, minDry = 10 } = {}) {
+  if (!wxHist?.byDay || !Object.keys(wxHist.byDay).length) return { learned: false, reason: "No past weather loaded for your sales dates, so rain sensitivity was not tested." };
+  const excl = excludedDates(cal), wet = [], dry = [];
+  for (const [k, t] of totals) {
+    if (k >= asOf || excl.has(k) || !(t.tickets > 0)) continue;
+    const w = wxHist.byDay[k]; if (!w || w.precip == null) continue;
+    const { med } = weekdayMedian(totals, k, weeks, excl); if (!med) continue;
+    const lr = Math.log(t.tickets / med);
+    if (w.precip >= 0.25) wet.push(lr); else if (w.precip < 0.02) dry.push(lr);
+  }
+  const base = { nWet: wet.length, nDry: dry.length };
+  if (wet.length < minWet || dry.length < minDry) return { learned: false, ...base, reason: `Only ${wet.length} rainy days (≥0.25 in) and ${dry.length} dry days with a comparable baseline — need ${minWet} and ${minDry}. Default weather rules stay.` };
+  const mean = a => a.reduce((s, v) => s + v, 0) / a.length, vr = a => { const m = mean(a); return a.reduce((s, v) => s + (v - m) ** 2, 0) / Math.max(1, a.length - 1); };
+  const diff = mean(wet) - mean(dry), se = Math.sqrt(vr(wet) / wet.length + vr(dry) / dry.length), t = se ? diff / se : 0, effect = Math.exp(diff);
+  if (Math.abs(t) < 2 || Math.abs(effect - 1) < 0.03) return { learned: false, ...base, effect, t, reason: `Rainy days ran ${pctTxt(effect)} vs dry days, but the difference isn't clear in your data (t = ${t.toFixed(1)}, need |t| ≥ 2 and ≥3%). Default weather rules stay.` };
+  return { learned: true, ...base, effect, t, reason: `Rainy days (≥0.25 in) ran ${pctTxt(effect)} vs dry days (${wet.length} wet, ${dry.length} dry, t = ${t.toFixed(1)}). Applied by rain chance in place of the default rain rules.` };
+}
+
+// Backtest on daily totals: forecast each of the last `days` dates from the data before it and compare
+// the day total. Reports MAPE for the daily model and for the old estimated curves. No weather.
+export function backtestDaily(totals, cal, { days = 28, weeks = 8 } = {}) {
+  const closed = new Set(cal.events.filter(e => e.closed).map(e => e.date));
+  const dates = [...totals.keys()].filter(k => totals.get(k).tickets > 0 && !closed.has(k)).sort().slice(-days);
+  const err = { daily: [], estimate: [] }, rows = [];
+  for (const k of dates) {
+    const a = totals.get(k).tickets, dl = learnDaily(totals, { asOf: k, weeks, cal }), up = learnUplifts(totals, cal, { asOf: k, weeks });
+    const sum = ctx => { let s = 0; for (let h = 0; h < 24; h++) { const x = hourModel(k, h, ctx); if (x.open) s += x.tickets; } return s; };
+    const base = { cal, weather: null, posRef: 1, closedDates: new Set() };
+    const est = sum({ ...base, learned: null, daily: null });
+    err.estimate.push(Math.abs(est - a) / a);
+    let p = null; if (dl) { p = sum({ ...base, learned: null, daily: dl, uplift: up }); err.daily.push(Math.abs(p - a) / a); }
+    rows.push({ date: k, actual: a, daily: p, estimate: est });
+  }
+  const m = e => e.length ? { mape: e.reduce((s, v) => s + v, 0) / e.length, n: e.length } : null;
+  return { dates: dates.length, daily: m(err.daily), estimate: m(err.estimate), rows };
+}
+
 // ---------------- calendar ----------------
 export function makeCalendar(json) {
   const cal = json || {};
   const sc = cal.schoolCalendar || {};
   const closed = new Set(sc.closed || []), early = new Set(sc.earlyDismissal || []);
   const isSchoolDay = k => { const d = dow(k); if (d === 0 || d === 6) return false; if (sc.firstDay && k < sc.firstDay) return false; if (sc.lastDay && k > sc.lastDay) return false; return !closed.has(k); };
-  const events = (cal.events || []).filter(e => e && e.date && e.lift != null);
-  return { isSchoolDay, isEarly: k => early.has(k), events, eventsOn: k => events.filter(e => e.date === k), hasSchoolData: !!sc.firstDay, raw: cal };
+  // "history": past dated days (holidays etc.) used only to learn uplift factors from sales data.
+  const events = [...(cal.events || []), ...(cal.history || []).map(e => ({ ...e, history: true }))].filter(e => e && e.date && e.lift != null);
+  const closedSchoolDays = new Set([...(sc.closed || []), ...(sc.pastClosed || [])]);
+  return { isSchoolDay, isEarly: k => early.has(k), events, eventsOn: k => events.filter(e => e.date === k), hasSchoolData: !!sc.firstDay, closedSchoolDays, raw: cal };
 }
 
 // ---------------- weather ----------------
 // byHour["YYYY-MM-DD|H"] = { tempF, pop, code, short, src }; byDay[key] = { high, low, rain, summary }
-export function weatherFactor(w, day, h) {
+export function weatherFactor(w, day, h, wxLearn = null) {
   if (!w) return null;
   let f = 1, app = 0; const why = [];
   const pop = w.pop ?? 0, severe = (w.code >= 95) || (w.short && /thunder|severe/i.test(w.short) && pop >= 70);
   if (severe) { f *= 0.9; why.push("severe storms keep families home"); }
+  else if (wxLearn && pop >= 20) { f *= 1 + (wxLearn.effect - 1) * pop / 100; app += pop >= 60 && h >= 11 && h <= 19 ? 2 : 0; why.push(`your sales: rainy days run ${wxLearn.effect >= 1 ? "+" : "−"}${Math.abs(Math.round((wxLearn.effect - 1) * 100))}% (scaled by the ${pop}% rain chance)`); }
+  else if (wxLearn) { /* learned rain effect, dry hour: no rain adjustment */ }
   else if (pop >= 60 && h >= 11 && h <= 19) { f *= 1.05; app += 2; why.push("steady rain favors the lane and stacks app tickets on the same fryer"); }
   else if (pop >= 35 && h >= 16 && h <= 19) { f *= 1.03; app += 1; why.push("storm chance after work — more cars stay in the lane"); }
   else if (pop >= 35 && h >= 11 && h <= 13) { f *= 1.02; app += 2; why.push("wet lunch hour lifts DoorDash / Uber / Grubhub"); }
@@ -228,33 +391,40 @@ export async function fetchWeather(fetchFn = fetch) {
   return { byHour, byDay, sources, fetchedAt: new Date().toISOString(), ok: Object.keys(byHour).length > 0 };
 }
 
+// Past daily weather for learning a rain effect from sales history (Open-Meteo archive, ~5-day lag).
+export async function fetchWeatherHistory(start, end, fetchFn = fetch) {
+  const u = `https://archive-api.open-meteo.com/v1/archive?latitude=${STORE.lat}&longitude=${STORE.lng}&start_date=${start}&end_date=${end}&daily=precipitation_sum,temperature_2m_max&precipitation_unit=inch&temperature_unit=fahrenheit&timezone=${encodeURIComponent(TZ)}`;
+  const r = await fetchFn(u); if (!r.ok) throw new Error(`Open-Meteo archive ${r.status}`);
+  const j = await r.json(), byDay = {};
+  (j.daily?.time || []).forEach((t, i) => { const p = j.daily.precipitation_sum[i]; if (p != null) byDay[t] = { precip: p, tmax: j.daily.temperature_2m_max[i] }; });
+  return { byDay, start, end, fetchedAt: new Date().toISOString(), source: "Open-Meteo archive" };
+}
+
 // ---------------- forecast ----------------
-function hourModel(dateKey, h, ctx) {
-  const d = dow(dateKey), hrs = HOURS[d], wd = WD[d];
-  if (h < hrs.open || h >= hrs.close || ctx.closedDates.has(dateKey)) return { hour:h, dateKey, weekdayShort:wd, open:false, score:0, popularity:0, tickets:0, appLoad:0, drivers:[], ...band(0) };
-  const { cal, learned, weather } = ctx, drivers = [];
-  const school = cal.isSchoolDay(dateKey), weekday = d >= 1 && d <= 5;
-  let tickets, appLoad = 0, mult = 1;
-  if (!learned) {
-    let pop = CURVES[d][h] || 20;
-    drivers.push({ kind:"baseline", label:"Typical Bojangles rhythm (estimated curve)", detail: DAY_NOTES[d], pct:0 });
-    for (const r of WEEKLY) {
-      if (!r.days.includes(d) || h < r.s || h >= r.e) continue;
-      if (r.school && !school) continue;
-      pop += r.delta; appLoad += r.app || 0;
-      drivers.push({ kind:r.kind, label:r.label, detail:r.detail, delta:r.delta });
-    }
-    tickets = pop * TICKETS_PER_POINT;
-  } else {
-    const b = learned.base[d][h];
-    tickets = b != null ? b : (CURVES[d][h] || 20) * learned.curveScale;
-    drivers.push({ kind:"baseline", label: b != null ? `POS median, last ${learned.weeks} weeks (${learned.samples[d][h]} ${wd}s)` : "Too few POS rows for this hour — curve scaled to your volume", detail: DAY_NOTES[d], pct:0 });
-    const share = learned.appShare[d][h];
-    if (share != null) { appLoad = share >= 0.18 ? 9 : share >= 0.1 ? 5 : share > 0.03 ? 2 : 0; if (appLoad) drivers.push({ kind:"delivery", label:`Apps ≈ ${Math.round(share*100)}% of tickets this hour (POS)`, detail:"DoorDash, Uber Eats, Grubhub and the app on the same fryer.", pct:0 }); }
-    else for (const r of WEEKLY) if (r.app && r.days.includes(d) && h >= r.s && h < r.e) appLoad += r.app;
+// Estimate-mode popularity for one weekday-hour: original curve + weekly rules (no multipliers).
+function rulesFor(d, h, school) {
+  let pop = CURVES[d][h] || 20, app = 0; const drivers = [];
+  for (const r of WEEKLY) {
+    if (!r.days.includes(d) || h < r.s || h >= r.e) continue;
+    if (r.school && !school) continue;
+    pop += r.delta; app += r.app || 0;
+    drivers.push({ kind:r.kind, label:r.label, detail:r.detail, delta:r.delta });
   }
-  // Things a weekday median can't know: applied as multipliers in both modes.
-  const mults = [];
+  return { pop, app, drivers };
+}
+// Default hourly curve for a weekday, in estimated tickets. Used to split a daily total across hours.
+const SHAPES = new Map();
+export function dayShape(d, school = d >= 1 && d <= 5) {
+  const k = `${d}|${school}`; if (SHAPES.has(k)) return SHAPES.get(k);
+  const arr = Array(24).fill(0), hrs = HOURS[d];
+  for (let h = hrs.open; h < hrs.close; h++) arr[h] = rulesFor(d, h, school).pop * TICKETS_PER_POINT;
+  const s = { arr, sum: arr.reduce((a, b) => a + b, 0) }; SHAPES.set(k, s); return s;
+}
+
+// Multipliers a weekday baseline can't know. Learned uplift corrections (from daily totals) and a
+// learned rain effect replace or adjust the defaults when present.
+function multsFor(dateKey, h, ctx) {
+  const { cal, weather, uplift, wxLearn } = ctx, d = dow(dateKey), weekday = d >= 1 && d <= 5, school = cal.isSchoolDay(dateKey), mults = [];
   if (weekday && !school && cal.hasSchoolData) {
     if (h >= 9 && h < 15) mults.push([1.10, "school", "No school today", "Kids and parents out midday (Shelby County Schools calendar)."]);
     if (h >= 6 && h < 8) mults.push([0.95, "school", "No school today", "Lighter drop-off rush."]);
@@ -262,14 +432,43 @@ function hourModel(dateKey, h, ctx) {
   if (school && cal.isEarly(dateKey) && h >= 12 && h < 14) mults.push([1.08, "school", "Early dismissal 1 PM", "Shelby County Schools early release."]);
   if (Number(dateKey.slice(8)) === 1 && h >= 11 && h < 20) mults.push([1.04, "payday", "First of the month", "Benefit and monthly-bill payday."]);
   for (const e of cal.eventsOn(dateKey)) if (h >= e.start && h < e.end) mults.push([e.lift, e.kind || "local", e.label, e.detail || "", e.source]);
-  const w = weatherFactor(weather?.byHour?.[`${dateKey}|${h}`], weather?.byDay?.[dateKey], h);
-  if (w) { mults.push([w.factor, "weather", w.label, w.detail]); appLoad += w.app; }
-  for (const [f, kind, label, detail, source] of mults) { mult *= f; drivers.push({ kind, label, detail, pct: Math.round((f - 1) * 100), source }); }
+  if (uplift) for (const k of dayKinds(dateKey, cal)) { const f = uplift.factors[k]; if (f?.learned) mults.push([f.factor, k === "noschool" ? "school" : k, `Learned from your sales: ${UPLIFT_NAMES[k] || k} days`, `${k === "noschool" ? "No-school weekdays" : `${UPLIFT_NAMES[k] || k} days`} ran ${pctTxt(f.factor)} vs what the default lifts predicted (median of ${f.n} days in your data). Applied to the whole day.`]); }
+  const w = weatherFactor(weather?.byHour?.[`${dateKey}|${h}`], weather?.byDay?.[dateKey], h, wxLearn);
+  if (w) mults.push([w.factor, "weather", w.label, w.detail, null, w.app]);
+  return mults;
+}
+const pctTxt = f => `${f >= 1 ? "+" : "−"}${Math.abs(Math.round((f - 1) * 100))}%`;
+export const UPLIFT_NAMES = { holiday:"Holiday", sports:"High school sports", college:"College football", local:"Local event", retail:"Retail", school:"School event", noschool:"No-school" };
+
+function hourModel(dateKey, h, ctx) {
+  const d = dow(dateKey), hrs = HOURS[d], wd = WD[d];
+  if (h < hrs.open || h >= hrs.close || ctx.closedDates.has(dateKey)) return { hour:h, dateKey, weekdayShort:wd, open:false, score:0, popularity:0, tickets:0, appLoad:0, drivers:[], ...band(0) };
+  const { cal, learned, daily } = ctx, drivers = [];
+  const school = cal.isSchoolDay(dateKey);
+  let tickets, appLoad = 0, mult = 1;
+  if (learned) {
+    const b = learned.base[d][h];
+    tickets = b != null ? b : (CURVES[d][h] || 20) * learned.curveScale;
+    drivers.push({ kind:"baseline", label: b != null ? `POS median, last ${learned.weeks} weeks (${learned.samples[d][h]} ${wd}s)` : "Too few POS rows for this hour — curve scaled to your volume", detail: DAY_NOTES[d], pct:0 });
+    const share = learned.appShare[d][h];
+    if (share != null) { appLoad = share >= 0.18 ? 9 : share >= 0.1 ? 5 : share > 0.03 ? 2 : 0; if (appLoad) drivers.push({ kind:"delivery", label:`Apps ≈ ${Math.round(share*100)}% of tickets this hour (POS)`, detail:"DoorDash, Uber Eats, Grubhub and the app on the same fryer.", pct:0 }); }
+    else for (const r of WEEKLY) if (r.app && r.days.includes(d) && h >= r.s && h < r.e) appLoad += r.app;
+  } else if (daily) {
+    const sh = dayShape(d, school), r = rulesFor(d, h, school), tot = daily.base[d];
+    tickets = sh.sum ? tot * sh.arr[h] / sh.sum : 0; appLoad = r.app;
+    drivers.push({ kind:"baseline", label: daily.samples[d] >= 3 ? `Your daily sales: ${WDL[d]} median ${Math.round(tot)} tickets (last ${daily.samples[d]} ${wd}s), split by the usual hourly curve` : `Few ${wd}s in your daily file — curve scaled to your volume (${Math.round(tot)}/day)`, detail: DAY_NOTES[d], pct:0 });
+    for (const x of r.drivers) drivers.push({ ...x, delta: undefined, pct: 0, detail: `${x.detail} (shapes how the day splits by hour)` });
+  } else {
+    const r = rulesFor(d, h, school);
+    drivers.push({ kind:"baseline", label:"Typical Bojangles rhythm (estimated curve)", detail: DAY_NOTES[d], pct:0 }, ...r.drivers);
+    tickets = r.pop * TICKETS_PER_POINT; appLoad = r.app;
+  }
+  for (const [f, kind, label, detail, source, app] of multsFor(dateKey, h, ctx)) { mult *= f; appLoad += app || 0; drivers.push({ kind, label, detail, pct: Math.round((f - 1) * 100), source }); }
   tickets *= mult;
-  // Score: estimate mode keeps the original 0-100 index; POS mode maps this store's 95th-pct hour to ~85.
-  const popularity = clamp(learned ? tickets / ctx.posRef * 85 : tickets / TICKETS_PER_POINT, 4, 100);
+  // Score: estimate mode keeps the original 0-100 index; data modes map this store's 95th-pct hour to ~85.
+  const popularity = clamp(learned || daily ? tickets / ctx.posRef * 85 : tickets / TICKETS_PER_POINT, 4, 100);
   const score = clamp(Math.round(popularity / 10), 1, 10);
-  return { hour:h, dateKey, weekdayShort:wd, open:true, popularity, score, tickets, appLoad, school, drivers: drivers.filter(x => x.kind !== "baseline" || drivers.length === 1 || learned), ...band(score) };
+  return { hour:h, dateKey, weekdayShort:wd, open:true, popularity, score, tickets, appLoad, school, drivers: drivers.filter(x => x.kind !== "baseline" || drivers.length === 1 || learned || daily), ...band(score) };
 }
 
 export function headline(day) {
@@ -282,16 +481,29 @@ export function headline(day) {
   return "Typical Chelsea 280 rhythm";
 }
 
-export function forecast({ now = new Date(), cal, pos = null, weather = null, days = DAYS_AHEAD, weeks = 8 } = {}) {
+export const SPREAD = { estimate: 0.25, daily: 0.18, pos: 0.15 };
+
+// pos = parsed hourly POS (parsePOS), daily = parsed daily CSV (parseDaily), wxHist = past daily weather
+// ({ byDay: { "YYYY-MM-DD": { precip, tmax } } }) for learning a rain effect.
+export function forecast({ now = new Date(), cal, pos = null, daily = null, wxHist = null, weather = null, days = DAYS_AHEAD, weeks = 8 } = {}) {
   cal = cal || makeCalendar({});
   const c = chicagoNow(now);
   const exclude = new Set(cal.events.map(e => e.date));
   const learned = pos ? learnFromPOS(pos, { asOf: c.dateKey, weeks, excludeDates: exclude }) : null;
   const useLearned = learned && learned.filledCells >= 40 ? learned : null; // need ~3+ days of hours
-  const baseVals = useLearned ? useLearned.base.flat().filter(v => v != null).sort((a, b) => a - b) : [];
+  const totals = daily || pos ? dailyTotals(daily, pos) : null;
+  const dl = totals && !useLearned ? learnDaily(totals, { asOf: c.dateKey, weeks, cal }) : null;
+  const uplift = totals ? learnUplifts(totals, cal, { asOf: c.dateKey, weeks }) : null;
+  const wxLearn = totals ? learnWeather(totals, wxHist, cal, { asOf: c.dateKey, weeks }) : null;
+  const dRatios = daily ? learnDailyRatios(daily) : null;
+  const mode = useLearned ? "pos" : dl ? "daily" : "estimate";
+  let baseVals = [];
+  if (useLearned) baseVals = useLearned.base.flat().filter(v => v != null);
+  else if (dl) for (let d = 0; d < 7; d++) { const s = dayShape(d); for (const v of s.arr) if (v) baseVals.push(dl.base[d] * v / s.sum); }
+  baseVals.sort((a, b) => a - b);
   const posRef = baseVals.length ? Math.max(1, baseVals[Math.floor(0.95 * (baseVals.length - 1))]) : 1;
   const closedDates = new Set(cal.events.filter(e => e.closed).map(e => e.date));
-  const ctx = { cal, learned: useLearned, weather, posRef, closedDates };
+  const ctx = { cal, learned: useLearned, daily: mode === "daily" ? dl : null, weather, posRef, closedDates, uplift, wxLearn: wxLearn?.learned ? wxLearn : null };
   const out = [];
   for (let i = 0; i < days; i++) {
     const key = addDays(c.dateKey, i), d = dow(key), hours = [];
@@ -307,9 +519,12 @@ export function forecast({ now = new Date(), cal, pos = null, weather = null, da
   }
   const today = out[0], cur = today.hours[c.hour];
   const later = [...today.hours.filter(x => x.hour > c.hour && x.open), ...out.slice(1).flatMap(d => d.hours.filter(x => x.open))];
+  let ratios = useLearned ? useLearned.ratios : DEFAULT_RATIOS;
+  if (!useLearned && dRatios?.learned.length) ratios = dRatios.ratios;
   return { generatedAt: now.toISOString(), dateKey: c.dateKey, hour: c.hour, minute: c.minute, current: cur, days: out,
     nextDead: later.find(x => x.key === "dead" || x.key === "slow") ?? null, nextBusy: later.find(x => x.key === "busy" || x.key === "packed") ?? null,
-    mode: useLearned ? "pos" : "estimate", learned: useLearned, posInsufficient: !!(learned && !useLearned), ratios: useLearned ? useLearned.ratios : DEFAULT_RATIOS };
+    mode, spread: SPREAD[mode], learned: useLearned, dailyLearned: dl, dailyInsufficient: !!(daily && !dl && !useLearned), uplift, wxLearn, dailyRatios: dRatios,
+    posInsufficient: !!(learned && !useLearned), ratios };
 }
 
 // ---------------- line production (same rules as the original board) ----------------
@@ -346,8 +561,8 @@ export function line(x, ratios = DEFAULT_RATIOS, wide = false) {
   const isOpening = x.weekdayShort === "Sun" ? x.hour === 6 : x.hour === 5;
   const p = pans(biscuits, isOpening, x.score >= 9);
   const roles = crewFor({ biscuits, chicken, tickets: Math.round(t), score: x.score, hour: x.hour, appLoad: x.appLoad });
-  const tea = Math.round(t * n.teaOz / 128 * 2) / 2, spread = wide ? 0.25 : 0.15;
-  return { hour:x.hour, open:true, part, tickets: round5(t), biscuits, biscuitLow: round5(b * (1 - spread)), biscuitHigh: round5(b * (1 + spread)), ...p,
+  const tea = Math.round(t * n.teaOz / 128 * 2) / 2, spread = typeof wide === "number" ? wide : wide ? 0.25 : 0.15;
+  return { hour:x.hour, open:true, part, tickets: round5(t), ticketLow: Math.round(t * (1 - spread)), ticketHigh: Math.round(t * (1 + spread)), spread, biscuits, biscuitLow: round5(b * (1 - spread)), biscuitHigh: round5(b * (1 + spread)), ...p,
     chicken, tenders: round5(t * (n.tenders ?? 0)), breakfastProteins: round5(t * n.breakfastProteins), fries: round5(t * n.fries), boRounds: round5(t * n.boRounds),
     sides: round5(t * n.sides * sm), gravy: round5(t * n.gravy), teaGallons: tea > 0 ? Math.max(0.5, tea) : 0, eightPiece: Math.max(1, Math.round(chicken / 8)),
     crew: roles.length, roles, appLoad: x.appLoad };

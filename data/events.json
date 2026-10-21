@@ -33,5 +33,20 @@
     {"date":"2026-12-19","start":11,"end":14,"lift":1.12,"kind":"local","label":"Post-parade lunch","detail":"Parade crowd heads home past the 280 frontage.","source":"https://www.cityofchelsea.com/218/Christmas-Parade"},
     {"date":"2026-12-25","start":5,"end":22,"lift":0.50,"kind":"holiday","label":"Christmas Day","detail":"Guess. Confirm store hours; if closed, add \"closed\": true.","source":"https://date.nager.at/api/v3/PublicHolidays/2026/US"},
     {"date":"2027-01-01","start":5,"end":22,"lift":0.85,"kind":"holiday","label":"New Year's Day","detail":"Guess. Late start, bowl-game afternoon. Confirm store hours.","source":"https://date.nager.at/api/v3/PublicHolidays/2027/US"}
+  ],
+  "_history": "Past dated days. Not forecast; used only so the board can learn holiday uplift from your daily or hourly sales (actual vs the same-weekday median). Lifts match the future entries' starting guesses. Add past local events (games, parades) here too, with a source.",
+  "history": [
+    {"date": "2025-10-31", "start": 17, "end": 21, "lift": 0.9, "kind": "holiday", "label": "Halloween night", "source": "https://www.cityofchelsea.com/calendar.aspx"},
+    {"date": "2025-11-11", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Veterans Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2025/US"},
+    {"date": "2025-11-27", "start": 5, "end": 22, "lift": 0.6, "kind": "holiday", "label": "Thanksgiving Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2025/US"},
+    {"date": "2025-12-25", "start": 5, "end": 22, "lift": 0.5, "kind": "holiday", "label": "Christmas Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2025/US"},
+    {"date": "2026-01-01", "start": 5, "end": 22, "lift": 0.85, "kind": "holiday", "label": "New Year's Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"},
+    {"date": "2026-01-19", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Martin Luther King Jr. Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"},
+    {"date": "2026-02-16", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Presidents' Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"},
+    {"date": "2026-05-25", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Memorial Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"},
+    {"date": "2026-06-19", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Juneteenth", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"},
+    {"date": "2026-07-04", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Independence Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"},
+    {"date": "2026-09-07", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Labor Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"},
+    {"date": "2026-10-12", "start": 5, "end": 22, "lift": 1.0, "kind": "holiday", "label": "Columbus Day", "source": "https://date.nager.at/api/v3/PublicHolidays/2026/US"}
   ]
 }

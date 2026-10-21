@@ -2,3 +2,5 @@ data/pos.csv
 *.pos.csv
 node_modules/
 tools/screenshot-*.png
+data/daily.csv
+*.daily.csv

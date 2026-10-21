@@ -1,0 +1,3 @@
+date,tickets,net_sales,biscuits,chicken_pieces,tenders,labor_hours,notes
+2026-10-12,612,5480.25,780,1150,240,96.5,EXAMPLE ROW - delete
+2026-10-13,575,5120.00,,,,,EXAMPLE ROW - delete (optional columns can be blank)
