@@ -1,0 +1,16 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Forecast self-check
+        run: node tools/check.mjs --offline
+      - name: Forecast unit tests
+        run: node --test tools/forecast.test.mjs

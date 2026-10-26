@@ -1,0 +1,34 @@
+{
+  "checkedAt": "2026-10-26",
+  "note": "National Bojangles announcements. None of these are confirmed on the Chelsea store menu. None of them change the forecast. End dates are stored only when a source gives a window; otherwise end is null and the item is marked unconfirmed.",
+  "items": [
+    {
+      "name": "Boojangles Bite Box",
+      "start": "2026-10-01",
+      "end": "2026-10-31",
+      "endConfirmed": false,
+      "scope": "National, participating locations, while supplies last",
+      "detail": "Press posts say the Bite Box and the app code 20BITEBOX run through October, launching October 1, 2026. No last-service clock time is posted. The Chelsea store is not confirmed.",
+      "source": "https://www.bojangles.com/news-and-community/pepsi-boojangles/",
+      "also": "https://www.restaurantnewsrelease.com/bojangles-transforms-into-boojangles-this-halloween-with-new-tricks-and-treats-to-enjoy/"
+    },
+    {
+      "name": "Pork Chop Griller, Donut Bites, Cinnamon Toast Crunch Iced Coffee",
+      "start": "2026-09-30",
+      "end": null,
+      "endConfirmed": false,
+      "scope": "Participating locations, while supplies last",
+      "detail": "Bojangles' fall menu post (Sept 30, 2026) says these are available now. No end date is posted, so none is guessed.",
+      "source": "https://www.bojangles.com/news-and-community/bojangles-fall-menu/"
+    },
+    {
+      "name": "Limited Time section on bojangles.com/menu",
+      "start": null,
+      "end": null,
+      "endConfirmed": false,
+      "scope": "National menu page, undated",
+      "detail": "On 2026-10-26 the national menu's Limited Time section listed 2 Steak Biscuits, Carolina Crunch Combo, Carolina Crunch 6pc Bo Bites Combo, Salted Caramel Apple Crisp, Cajun Filet and Bo-Rounds for $5, and Bo's House Salad. No start or end dates were on the page.",
+      "source": "https://www.bojangles.com/menu/"
+    }
+  ]
+}

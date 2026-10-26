@@ -1,0 +1,23 @@
+{
+  "live": false,
+  "queriedAt": "2026-10-26",
+  "source": "ALDOT Traffic Data Management public map service",
+  "url": "https://aldotgis.dot.state.al.us/pubgis2/rest/services/EGISATDServices/TDMPublic/MapServer/0",
+  "viewer": "https://aldotgis.dot.state.al.us/TDMPublic/",
+  "note": "Annual average daily traffic from ALDOT's public layer. The newest year returned for these stations was 2017. This is not a live speed or volume feed, so it does not change the hourly forecast. In this layer, route AL0000380000 is described both as AL-38 and as US Hwy 280.",
+  "nearest": {
+    "station": "3",
+    "routeId": "AL0000380000",
+    "description": "AL38 east of Stanley Dr",
+    "aadt": 37510,
+    "year": 2017,
+    "milesFromStore": 0.61,
+    "lat": 33.34865,
+    "lng": -86.62796
+  },
+  "nearby": [
+    {"station": "553", "routeId": "AL0000380000", "description": "AL38 west of CR440", "aadt": 27490, "year": 2017, "milesFromStore": 1.1},
+    {"station": "554", "routeId": "AL0000380000", "description": "AL38 southeast of CR43", "aadt": 37030, "year": 2017, "milesFromStore": 1.44},
+    {"station": "158", "routeId": "AL0000380000", "description": "AL38 northwest of CR43", "aadt": 42760, "year": 2017, "milesFromStore": 1.96}
+  ]
+}
