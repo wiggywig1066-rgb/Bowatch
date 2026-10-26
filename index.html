@@ -9,8 +9,13 @@
 <meta name="theme-color" content="#1a120c" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="mask-icon" href="favicon.svg" color="#e8641f">
 <link rel="manifest" href="manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Bo Watch">
 <script>
   // Set the theme before first paint. ?theme=dark|light|auto overrides (and is saved).
   (function () { try {
@@ -47,6 +52,7 @@
     <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V6M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v13M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-menu" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></g></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3 2.8 19.5A1.5 1.5 0 0 0 4.1 22h15.8a1.5 1.5 0 0 0 1.3-2.5z"/><path d="M12 9v5M12 17.5v.5" stroke-linecap="round"/></g></symbol>
   </defs>
 </svg>
 <a class="skip" href="#app">Skip to the board</a>
@@ -57,12 +63,19 @@
   </a>
   <div class="hdr-right">
     <span class="clock tnum" id="clock" aria-live="off">—</span>
-    <span class="mode-pill" id="modepill">—</span>
+    <button class="mode-pill" id="modepill" type="button">—</button>
     <button class="icon-btn" id="themebtn" type="button" aria-label="Theme">—</button>
   </div>
 </div></header>
 <main class="wrap" id="app" tabindex="-1"><p class="muted" style="padding:24px 0">Loading the board…</p></main>
 <footer><div class="wrap" id="foot"></div></footer>
+<nav class="tabbar" aria-label="Sections">
+  <button type="button" data-nav="now" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span>Now</span></button>
+  <button type="button" data-nav="week"><svg class="ic" aria-hidden="true"><use href="#i-chart"/></svg><span>Outlook</span></button>
+  <button type="button" data-nav="cook"><svg class="ic" aria-hidden="true"><use href="#i-biscuit"/></svg><span>Cook</span></button>
+  <button type="button" data-nav="crew"><svg class="ic" aria-hidden="true"><use href="#i-crew"/></svg><span>Crew</span></button>
+  <button type="button" data-nav="data"><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg><span>Sales</span></button>
+</nav>
 <div class="sr-only" id="announce" aria-live="polite"></div>
 <noscript><p style="padding:16px">Bo Watch needs JavaScript to build the forecast.</p></noscript>
 <script type="module" src="js/app.js"></script>

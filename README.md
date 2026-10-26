@@ -1,138 +1,95 @@
-# Bo Watch — Chelsea 280 line board (standalone rebuild)
+# Bo Watch — Chelsea line board
 
-Hourly customer, biscuit, chicken and crew forecasts for Bojangles at 15392 US-280, Chelsea, AL.
-Rebuilt from the Grok app-builder version (botime.grok.me) as a plain static site: no build step,
-no server, no API keys. Open `index.html` through any static web server.
+Hourly ticket, biscuit, bone-in chicken, Bo’s Tenders, and crew forecast for **one restaurant**: the Bojangles at 15392 US-280, Chelsea, Alabama (Shelby County). Built for production and crew planning on a phone.
 
-Live: https://wiggywig1066-rgb.github.io/Bowatch/ — redeploys automatically on push to `main`
-(see "Hosting" below). The old temporary host was https://87ff2e09478743d4.flypod.page.
+This is not an official Bojangles product. It does not use the Bojangles logo.
 
-## Files
+Live site: https://wiggywig1066-rgb.github.io/Bowatch/
 
-| Path | What it is |
+Plain HTML, CSS, and JavaScript. No build step and no API key. Open `index.html` from any static server. GitHub Actions runs the forecast checks, then publishes this repo to GitHub Pages on every push to `main`.
+
+## The board
+
+Five tabs along the bottom:
+
+| Tab | What it is for |
 | --- | --- |
-| `index.html`, `css/style.css` | Page shell, inline SVG icon set, mobile-first light/dark theme (system fonts, no CDN) |
-| `favicon.svg`, `manifest.webmanifest` | Icon (generic biscuit mark — no Bojangles logos) and "add to home screen" manifest |
-| `js/engine.js` | Forecast engine (also runs in Node) — baselines, rules, weather, hourly POS + daily sales learning, line production, crew |
-| `js/app.js` | UI: Right-now card, 7-day outlook, SVG hourly chart with range band, Cook / Manager / Scheduler views, hour table, drivers, events, data panel, menu |
-| `data/events.json` | **Editable** calendar: dated events, past holidays (`history`, for learning), Shelby County Schools calendar |
-| `data/menu.json` | Menu items the board tracks, with sources and the last check date |
-| `data/pos_template.csv`, `data/daily_template.csv` | Headers for hourly POS and daily sales exports |
-| `tools/check.mjs` | Self-tests + sanity check: `node tools/check.mjs [pos.csv] [--daily daily.csv] [--wxhist wx.json] [--offline]` |
-| `tools/publish.sh`, `tools/deploy.sh` | Copy site files (never sales CSVs) to `/workspace/bowatch-public`; old flypod redeploy |
+| Now | What to cook and staff this hour and the next two, with a plain-English reason and an hourly chart |
+| Outlook | The next 7 days, then days 8–14. Tap a day for its hours |
+| Cook | Drop-and-cook card for each open hour (pans at :00, :20, :40) |
+| Crew | Crew by shift, plus a 14-day call sheet |
+| Sales | Load, export, or clear sales. Files never leave the phone |
 
-## The board (UI)
+The header theme button cycles Auto, Light, and Dark. `?theme=light`, `?theme=dark`, or `?theme=auto` does the same. `?view=now|week|cook|crew|data` opens a tab directly.
 
-* **Right now** card: this hour's tickets (with likely range), the next biscuit drop (time, pans, biscuits),
-  chicken pieces, crew needed with roles, and what changes next hour (add / cut crew).
-* **7-day outlook**: weather icon, high/low, rain chance, expected tickets bar colored by the peak, event
-  and no-school badges, "call in" flag. Week 2 is a compact row. Tap any day to load its shift.
-* **Hourly chart** (inline SVG): bars colored by intensity, shaded likely range (low–high), NOW marker,
-  top two peaks labeled. Tap / arrow-key through hours; the selected hour drives the views below.
-* Cook / Manager / Scheduler tabs, hour-by-hour table, drivers, kitchen load, events, data panel, menu, sources.
-* Theme: Auto (follows the device), Light, Dark — header button, saved per device. `?theme=dark` forces it.
-* Keyboard: Tab to the chart, ←/→ moves hours, Enter selects rows; tabs use ←/→. Reduced-motion respected.
+Add to Home Screen uses the web manifest. `sw.js` keeps a network-first copy of the board for offline use. Live weather still needs a connection.
 
-## How the forecast works
+Each open hour shows why it differs from a usual hour of that weekday, for example `Rain +0%, Friday payday +6%, Home game −8%`. A chip without a “your sales” tag is an **assumption**. The likely range is an assumption until a walk-forward backtest on your own file replaces it.
 
-| Data loaded | Mode | Day total | Hourly shape | Range |
+## How a count is built
+
+| What you have loaded | Mode | Day total | Hourly shape | Starting range |
 | --- | --- | --- | --- | --- |
-| none | estimate | original curves + weekly rules | same | ±25% |
-| daily CSV only | daily | median of the last 8 same weekdays | default curve (original curves + weekly rules) | ±18% |
-| hourly POS (with or without daily) | pos | median per weekday × hour, last 8 weeks | from POS | ±15% |
+| Nothing | Assumptions | Hand-set weekday curves | Same curves, plus the weekly rhythm | ±25% |
+| Daily CSV | Daily sales | Median of the last 8 same weekdays | Default curve | ±18%, narrower once 4 or more samples exist |
+| Hourly CSV | Hourly sales | Median of that weekday and hour | From your file | ±15%, narrower with more samples |
 
-* **Estimate mode:** the original app's weekday curves plus the same weekly rules (280 rush, church,
-  payday, delivery windows, 4x4 staging…). A banner says the numbers are estimates.
-* **Daily mode:** each weekday's day total = median tickets of the last 8 same weekdays (event,
-  holiday and no-school days left out; needs 3+ samples for 3+ weekdays, thin weekdays are scaled from
-  the others). The total is split across hours with the default hourly curve for that weekday.
-  If the file has `biscuits`, `chicken_pieces` or `tenders` (7+ days), the default per-ticket ratios are
-  scaled so the day matches. `labor_hours` gives a tickets-per-labor-hour figure (shown, not used for crew).
-* **Hourly POS mode:** as before — median for each weekday × hour, item ratios by daypart (200+ tickets),
-  app share from channel columns. It takes priority for the hourly shape whenever enough rows exist.
-* **Learned special days (any sales data):** day totals from the daily file (and hourly POS days with
-  10+ hours) are compared with the same-weekday median of the 8 weeks before. For each event kind in
-  `events.json` (holiday, sports, college, local…) and for listed no-school weekdays, the board takes the
-  median of *actual ÷ (median × what the default lifts predicted)*. With **3+ comparable days** the kind
-  gets a learned day factor on top of the default hourly lifts; with fewer, defaults stay and the panel
-  says how many more days it needs. Past holidays are listed under `history` in `events.json` so a few
-  months of data already has comparable days.
-* **Learned rain effect:** the browser fetches past daily rain (Open-Meteo archive) for your sales dates
-  and compares rainy days (≥0.25 in) with dry days (<0.02 in). It is used only with 6+ rainy and 10+ dry
-  days, a clear difference (Welch t ≥ 2) and an effect ≥3%; then it replaces the default rain rules,
-  scaled by each hour's rain chance. Otherwise it is skipped and the panel says why.
-* **Backtests:** daily — each of the last 28 days is forecast from the data before it and compared on
-  the day total (MAPE, vs the estimated curves). Hourly — MAPE by daypart, as before. Neither uses weather.
-* **All modes** layer on things a weekday median can't know: dated events (`lift`), no-school weekdays,
-  early dismissals, the 1st of the month, and live hourly weather (NWS ~7 days, then Open-Meteo; 30-min cache).
-* Line production and crew roles use the original board's rules (16/pan, drops every 20 min, crew thresholds).
+Hourly sales win over a daily file when the hourly file has enough recent rows. With either file, holiday and event multipliers are learned only after 3 comparable days. Rain is learned only with at least 6 wet and 10 dry days and a clear difference. Heat is learned only with at least 4 hot and 8 milder days. Until then the prior stays, and the screen says so.
+
+The band becomes the 80th percentile of absolute percent error from the daily walk-forward backtest once that backtest exists, clamped between 8% and 45%. That band is no longer labeled an assumption.
+
+Things a weekday median does not already contain are layered on top: dated events, no-school weekdays, early dismissal, the 1st, the 15th, month-end, a spring-forward trim on the first two open hours, and live weather. Friday payday is already inside the Friday curve in assumption mode, and already inside a Friday median once you load sales, so it is not applied twice. SNAP issuance and Social Security payment dates are notes with **no percent**. Fall-back is a note with no percent.
+
+Line counts (16 biscuits to a pan, drops every 20 minutes, crew roles) use the same thresholds as the earlier board. This store does not sell Chicken Supremes. A `supremes` column in an old export is read as Bo’s Tenders.
+
+## Data sources
+
+| Source | URL | Live or static |
+| --- | --- | --- |
+| NWS hourly forecast | https://api.weather.gov/points/33.3401,-86.6303 | Live, about 7 days. No precip amount on the hourly product |
+| NWS alerts, Shelby County and zone ALZ025 | https://api.weather.gov/alerts/active?zone=ALC117,ALZ025 | Live. Tornado, severe thunderstorm, and flash-flood warnings and watches change the hour. Other alerts are shown only |
+| Open-Meteo forecast | https://api.open-meteo.com/v1/forecast | Live backup, and the hourly precip amount |
+| Open-Meteo archive | https://archive-api.open-meteo.com/v1/archive | Live, only after sales are loaded, for the rain and heat tests |
+| Shelby County Schools and dated local events | `data/events.json` (each row has its own source URL) | Static file. Unconfirmed kickoffs stay marked unconfirmed. Nothing in that file was given a date that was not on a source |
+| US public holidays, used to move Social Security off weekends | https://date.nager.at/api/v3/PublicHolidays/2026/US (2025 and 2027 too), copied into `data/holidays.json` | Static snapshot fetched 2026-10-26. The list itself does not change guest counts |
+| Social Security payment rules | https://www.ssa.gov/pubs/calendar.htm and https://www.ssa.gov/kc/rp_paybenefits.htm | Computed. Notes only |
+| Daylight saving time | https://www.nist.gov/pml/time-and-frequency-division/popular-links/daylight-saving-time | Rule. Spring-forward is a −3% prior on the first two open hours. Fall-back is a note |
+| Alabama SNAP issuance | https://fns-prod.azureedge.us/sites/default/files/resource-files/Monthly-Issuance-Schedule-All-States.pdf | Static schedule, 4th–23rd by case number. Note only |
+| ALDOT traffic counts on US-280 | https://aldotgis.dot.state.al.us/pubgis2/rest/services/EGISATDServices/TDMPublic/MapServer/0 | Static. Nearest station’s newest year on that layer was 2017. Not used in the hourly math |
+| Bojangles national promos | https://www.bojangles.com/news-and-community/pepsi-boojangles/ and the other URLs in `data/promos.json` | Static check on 2026-10-26. Not confirmed at Chelsea. Not used in the math |
+
+## Privacy
+
+Real daily sales, tickets, and POS exports stay on the device. The Sales tab reads a file or pasted text in the browser and stores it in `localStorage`, with IndexedDB if local storage cannot hold it. Export and Clear are on that tab. `data/daily.csv`, `*.daily.csv`, `data/pos.csv`, and `*.pos.csv` are gitignored, and `tools/publish.sh` strips them. Do not add a sales file to this public repo. A clearly named `TEST` / synthetic series is fine for tests.
 
 ## Menu
 
-`data/menu.json` lists the menu items the board tracks, what it doesn't track, and the sources, with a
-`checkedAt` date (last check 2026-10-20). This store sells **no Chicken Supremes**. Its boneless chicken
-is Bo's Chicken Tenders and Bo Bites, so the board shows "Bo's Tenders" where it used to show Supremes.
-The tenders-per-ticket ratio is the old Supremes estimate until POS data with a `tenders` column is loaded.
-POS files with the old `supremes` column still load; that column is read as tenders.
-To re-check the menu, compare the store's delivery menu and bojangles.com/menu against `menu.json`,
-then update the file and bump `checkedAt`.
+`data/menu.json` keeps `checkedAt`, `sources`, and `tracked` so the weekly menu check can keep updating it. Do not add Chicken Supremes.
 
-## Update events
+## Checks
 
-Edit `data/events.json`, then redeploy. Each entry:
-
-```json
-{"date":"2026-11-28","start":13,"end":20,"lift":1.08,"kind":"college",
- "label":"Iron Bowl: Auburn at Alabama","detail":"…","source":"https://…"}
+```bash
+node tools/check.mjs --offline
+node --test tools/forecast.test.mjs
 ```
 
-* `start`/`end` are 24-hour clock, `end` not included. `lift` 1.10 = +10%, 0.90 = −10%.
-* Add `"closed": true` to mark the store closed all day (e.g. if it closes Thanksgiving/Christmas).
-* Always put a checkable `source` URL. When the SEC sets a flex kickoff, narrow the window.
-* `schoolCalendar.closed` / `earlyDismissal` come from the Shelby County Schools PDF linked in the file.
-* Bump `"updated"` so the page shows when the calendar was last refreshed.
+`tools/check.mjs` prints a walk-forward backtest on a **synthetic** series (labeled in the script, not this store). `.github/workflows/ci.yml` runs both commands on push and pull request. The Pages workflow runs them before upload.
 
-## Load sales data
-
-**Daily (easiest):** export one row per day with `date,tickets,net_sales,notes` (see
-`data/daily_template.csv`); optional `biscuits,chicken_pieces,tenders,labor_hours`. Dates `YYYY-MM-DD` or
-`M/D/YYYY`; `$` and thousands commas are fine; a later row for the same date replaces an earlier one.
-8+ weeks gives every weekday a full median; 3+ weeks is the minimum.
-
-**Hourly POS (most accurate):** one row per date + hour in the `pos_template.csv` columns:
-`date,hour,tickets,net_sales,biscuits,chicken_pieces,tenders,channel_drive_thru,channel_lobby,channel_doordash,channel_ubereats,channel_grubhub,channel_app,labor_hours,notes`.
-Only `date`, `hour`, `tickets` are required.
-
-On the page: **Your sales data → Load daily CSV / Load hourly CSV**. Files are parsed in the browser and
-saved in that browser's local storage only (each device loads its own). "Remove" clears them. The panel
-shows the active data (none / daily / hourly), the weekday baselines, learned ratios, special-day
-factors, the rain test result and the backtests.
-
-**Never commit sales data.** `.gitignore` blocks `data/pos.csv`, `data/daily.csv`, `*.pos.csv`, `*.daily.csv`,
-and `publish.sh` strips them. Test with a clearly labeled synthetic file kept outside the repo.
-
-Optional shared file: put the CSV at `data/pos.csv` and add `"posFile": "data/pos.csv"` to
-`events.json`. **Don't do this on a public host** — anyone with the link could download the sales data.
-`publish.sh` strips `data/pos.csv` from deploys for that reason.
+`tools/deploy.sh` only runs those checks. It does not deploy. The old flypod host is not used.
 
 ## Run locally
 
 ```bash
-cd /workspace/bowatch-app && python3 -m http.server 8787   # open http://localhost:8787
-node tools/check.mjs                                        # self-tests + 14-day board with live weather
-node tools/check.mjs --daily /path/daily.csv               # same, with a daily file
+python3 -m http.server 8787
 ```
 
-## Redeploy
+Open http://localhost:8787 . File URLs will not load the JSON data or the module script reliably; use a static server.
 
-```bash
-/workspace/bowatch-app/tools/deploy.sh    # runs check.mjs, publishes, `flypod update` to the same URL
-```
+## Known limits
 
-## Hosting
-
-The site is live at https://wiggywig1066-rgb.github.io/Bowatch/ and redeploys automatically on every push to `main`. GitHub Actions publishes the repo root to GitHub Pages; there is no build step.
-
-**Old temporary host:** flypod anonymous deploy (no account) at https://87ff2e09478743d4.flypod.page. Updates went to that URL with `tools/deploy.sh`. It expires **Nov 2, 2026 (5:16 PM CT)**. To keep it, someone runs `npx flypod login` on this box (free account) — that claims the site, same URL, no expiry.
-
-Cursor Origin can store the git repo but has no static-site/Pages serving, and creating a repo needs James's approval.
+- With no sales file, every count and the ±25% band is an assumption.
+- SNAP, Social Security, fall-back, the 2017 traffic count, and national promos do not change the forecast.
+- NWS hourly has no precip amount. The hourly inches come from Open-Meteo. The NWS grid’s 6-hour precipitation is not fetched.
+- Some kickoffs are still unconfirmed (UAB, the Iron Bowl window, Auburn where the school only says “early”). The Blood Rock 100 page lists both 10:00 AM and 11:00 AM. The Chelsea High game on Oct 30, 2026 follows the later MaxPreps listing after an earlier Thursday listing.
+- Thanksgiving and Christmas use a prior, and store hours that day are not confirmed. Add `"closed": true` on the event if the store is dark.
+- Accuracy numbers from `check.mjs` are synthetic. They are not this store’s error.

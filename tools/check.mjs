@@ -53,7 +53,7 @@ const fcS = forecast({ now: NOW, cal, daily: short, weather: null });
 ok(fcS.mode === "estimate" && fcS.dailyInsufficient, "a week-old file is too short: stays in estimate mode and flags it");
 ok(!fcS.uplift.factors.holiday?.learned, "no uplift learned without enough comparable days (defaults stay)");
 const bt = backtestDaily(dailyTotals(daily, null), cal, { days: 28 });
-ok(bt.dates === 28 && bt.daily && bt.daily.mape < bt.estimate.mape, `daily backtest, 28 days: daily model ${(bt.daily.mape * 100).toFixed(1)}% MAPE vs estimate ${(bt.estimate.mape * 100).toFixed(1)}%`);
+ok(bt.dates === 28 && bt.daily && bt.daily.mape < bt.estimate.mape, `daily backtest, 28 days: daily model ${(bt.daily.mape * 100).toFixed(1)}% MAPE (p80 ${(bt.daily.p80 * 100).toFixed(1)}%, bias ${((bt.bias.daily) * 100).toFixed(1)} pts) vs estimate ${(bt.estimate.mape * 100).toFixed(1)}% MAPE`);
 // Hourly POS wins for the shape.
 const posRows = ["date,hour,tickets"]; for (let k = "2026-09-20"; k < "2026-10-21"; k = addDays(k, 1)) for (let h = 6; h < 22; h++) posRows.push(`${k},${h},${20 + (h === 12 ? 40 : 0)}`);
 const fcP = forecast({ now: NOW, cal, daily, pos: parsePOS(posRows.join("\n")), weather: null });

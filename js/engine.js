@@ -319,23 +319,28 @@ export function learnWeather(totals, wxHist, cal, { asOf, weeks = 8, minWet = 6,
   return { learned: true, ...base, effect, t, reason: `Rainy days (≥0.25 in) ran ${pctTxt(effect)} vs dry days (${wet.length} wet, ${dry.length} dry, t = ${t.toFixed(1)}). Applied by rain chance in place of the default rain rules.` };
 }
 
+function errSummary(e) {
+  if (!e?.length) return null;
+  const s = [...e].sort((a, b) => a - b);
+  return { mape: s.reduce((a, b) => a + b, 0) / s.length, p80: s[Math.min(s.length - 1, Math.floor(0.8 * (s.length - 1)))], n: s.length };
+}
 // Backtest on daily totals: forecast each of the last `days` dates from the data before it and compare
 // the day total. Reports MAPE for the daily model and for the old estimated curves. No weather.
 export function backtestDaily(totals, cal, { days = 28, weeks = 8 } = {}) {
   const closed = new Set(cal.events.filter(e => e.closed).map(e => e.date));
   const dates = [...totals.keys()].filter(k => totals.get(k).tickets > 0 && !closed.has(k)).sort().slice(-days);
-  const err = { daily: [], estimate: [] }, rows = [];
+  const err = { daily: [], estimate: [] }, bias = { daily: [], estimate: [] }, rows = [];
   for (const k of dates) {
-    const a = totals.get(k).tickets, dl = learnDaily(totals, { asOf: k, weeks, cal }), up = learnUplifts(totals, cal, { asOf: k, weeks });
+    const a = totals.get(k).tickets, dl = learnDaily(totals, { asOf: k, weeks, cal }), up = learnUplifts(totals, cal, { asOf: k, weeks }), calendar = learnCalendar(totals, { asOf: k, weeks, cal });
     const sum = ctx => { let s = 0; for (let h = 0; h < 24; h++) { const x = hourModel(k, h, ctx); if (x.open) s += x.tickets; } return s; };
     const base = { cal, weather: null, posRef: 1, closedDates: new Set() };
     const est = sum({ ...base, learned: null, daily: null });
-    err.estimate.push(Math.abs(est - a) / a);
-    let p = null; if (dl) { p = sum({ ...base, learned: null, daily: dl, uplift: up }); err.daily.push(Math.abs(p - a) / a); }
-    rows.push({ date: k, actual: a, daily: p, estimate: est });
+    err.estimate.push(Math.abs(est - a) / a); bias.estimate.push((est - a) / a);
+    let p = null; if (dl) { p = sum({ ...base, learned: null, daily: dl, uplift: up, calendar }); err.daily.push(Math.abs(p - a) / a); bias.daily.push((p - a) / a); }
+    rows.push({ date: k, dow: dow(k), actual: a, daily: p, estimate: est });
   }
-  const m = e => e.length ? { mape: e.reduce((s, v) => s + v, 0) / e.length, n: e.length } : null;
-  return { dates: dates.length, daily: m(err.daily), estimate: m(err.estimate), rows };
+  const mean = a => a.length ? a.reduce((s, v) => s + v, 0) / a.length : null;
+  return { dates: dates.length, daily: errSummary(err.daily), estimate: errSummary(err.estimate), bias: { daily: mean(bias.daily), estimate: mean(bias.estimate) }, rows };
 }
 
 // ---------------- calendar ----------------
@@ -352,43 +357,130 @@ export function makeCalendar(json) {
 
 // ---------------- weather ----------------
 // byHour["YYYY-MM-DD|H"] = { tempF, pop, code, short, src }; byDay[key] = { high, low, rain, summary }
-export function weatherFactor(w, day, h, wxLearn = null) {
-  if (!w) return null;
-  let f = 1, app = 0; const why = [];
-  const pop = w.pop ?? 0, severe = (w.code >= 95) || (w.short && /thunder|severe/i.test(w.short) && pop >= 70);
-  if (severe) { f *= 0.9; why.push("severe storms keep families home"); }
-  else if (wxLearn && pop >= 20) { f *= 1 + (wxLearn.effect - 1) * pop / 100; app += pop >= 60 && h >= 11 && h <= 19 ? 2 : 0; why.push(`your sales: rainy days run ${wxLearn.effect >= 1 ? "+" : "−"}${Math.abs(Math.round((wxLearn.effect - 1) * 100))}% (scaled by the ${pop}% rain chance)`); }
-  else if (wxLearn) { /* learned rain effect, dry hour: no rain adjustment */ }
-  else if (pop >= 60 && h >= 11 && h <= 19) { f *= 1.05; app += 2; why.push("steady rain favors the lane and stacks app tickets on the same fryer"); }
-  else if (pop >= 35 && h >= 16 && h <= 19) { f *= 1.03; app += 1; why.push("storm chance after work — more cars stay in the lane"); }
-  else if (pop >= 35 && h >= 11 && h <= 13) { f *= 1.02; app += 2; why.push("wet lunch hour lifts DoorDash / Uber / Grubhub"); }
-  if (w.tempF != null && w.tempF <= 32 && h <= 9) { f *= 0.92; why.push("freezing morning"); }
-  if (day?.high >= 90 && h >= 11 && h <= 18) { f *= 1.03; why.push("heat favors the drive-thru"); }
+const ALERT_RULES = [
+  { test: /tornado warning/i, factor: 0.82, label: "Tornado warning" },
+  { test: /severe thunderstorm warning/i, factor: 0.90, label: "Severe storm warning" },
+  { test: /flash flood warning/i, factor: 0.93, label: "Flash flood warning" },
+  { test: /tornado watch/i, factor: 0.95, label: "Tornado watch" },
+  { test: /severe thunderstorm watch/i, factor: 0.97, label: "Severe storm watch" },
+];
+const HOUR_CACHE = new Map();
+function hourInterval(dateKey, hour) {
+  const key = `${dateKey}|${hour}`;
+  if (HOUR_CACHE.has(key)) return HOUR_CACHE.get(key);
+  const [y, m, d] = dateKey.split("-").map(Number);
+  let utc = Date.UTC(y, m - 1, d, hour + 6, 0, 0);
+  for (let i = 0; i < 5; i++) {
+    const c = chicagoNow(new Date(utc));
+    const deltaDays = (Date.parse(`${dateKey}T00:00:00Z`) - Date.parse(`${c.dateKey}T00:00:00Z`)) / 86400000;
+    const delta = deltaDays * 24 + (hour - c.hour);
+    if (delta === 0) break;
+    utc += delta * 3600000;
+  }
+  const span = { start: new Date(utc), end: new Date(utc + 3600000) };
+  HOUR_CACHE.set(key, span);
+  return span;
+}
+export function activeAlertFactor(alerts, dateKey, h) {
+  if (!alerts?.length || !dateKey) return null;
+  const { start, end } = hourInterval(dateKey, h);
+  let best = null;
+  for (const a of alerts) {
+    const onset = a.onset ? new Date(a.onset) : null;
+    const ends = a.ends ? new Date(a.ends) : null;
+    if (onset && end <= onset) continue;
+    if (ends && start >= ends) continue;
+    const rule = ALERT_RULES.find(r => r.test.test(a.event || ""));
+    if (!rule) continue;
+    if (!best || rule.factor < best.factor) best = { ...rule, event: a.event, headline: a.headline || "" };
+  }
+  return best;
+}
+export function weatherFactor(w, day, h, wxLearn = null, extra = null) {
+  const heatLearn = extra?.heatLearn || null;
+  const alerts = extra?.alerts || [];
+  const dateKey = extra?.dateKey;
+  if (!w && !alerts.length) return null;
+  let f = 1, app = 0; const why = []; const adjustments = [];
+  const add = (factor, label, detail, assumption) => {
+    f *= factor;
+    why.push(detail);
+    adjustments.push({ label, pct: Math.round((factor - 1) * 100), assumption, detail, kind: "weather", why: true });
+  };
+  const alert = activeAlertFactor(alerts, dateKey, h);
+  const pop = w?.pop ?? 0;
+  const inches = w?.precipIn;
+  const heavy = inches != null && inches >= 0.15;
+  if (alert) {
+    add(alert.factor, alert.label, `Assumption ${Math.round((alert.factor - 1) * 100)}% while a ${alert.event} covers this hour. ${alert.headline}`.trim(), true);
+  } else if (w) {
+    const rainSignal = pop >= 20 || heavy || (inches != null && inches >= 0.05);
+    if (wxLearn?.learned && rainSignal) {
+      const scale = heavy ? Math.max(pop, 60) / 100 : pop / 100;
+      const factor = 1 + (wxLearn.effect - 1) * Math.max(scale, heavy ? 0.6 : 0);
+      add(factor, "Rain", `Learned from your sales: rainy days run ${pctTxt(wxLearn.effect)} vs dry days, scaled to this hour${inches != null ? ` (${inches.toFixed(2)} in)` : ""}.`, false);
+      if (pop >= 60 && h >= 11 && h <= 19) app += 2;
+    } else if (!wxLearn?.learned) {
+      if ((w.code >= 95) || (w.short && /thunder|severe/i.test(w.short) && pop >= 70)) add(0.9, "Severe storms", "Assumption −10% when the forecast itself says thunderstorms or severe weather. Families stay home.", true);
+      else if (heavy && h >= 11 && h <= 19) { add(1.04, "Heavy rain", `Assumption +4% when this hour has about ${inches.toFixed(2)} in. Not measured at this store.`, true); app += 2; }
+      else if (pop >= 60 && h >= 11 && h <= 19) { add(1.05, "Rain", `Assumption +5% when the rain chance is ${pop}% at midday (original board).${inches != null ? ` ${inches.toFixed(2)} in forecast.` : ""}`, true); app += 2; }
+      else if (pop >= 35 && h >= 16 && h <= 19) { add(1.03, "Rain", `Assumption +3% for a ${pop}% storm chance after work.`, true); app += 1; }
+      else if (pop >= 35 && h >= 11 && h <= 13) { add(1.02, "Rain", `Assumption +2% for a wet lunch hour (${pop}% chance).`, true); app += 2; }
+      else if (rainSignal) add(1, "Rain", `Rain is on the forecast (${pop}%${inches != null ? `, ${inches.toFixed(2)} in` : ""}) but under the prior's threshold, so the guest count is unchanged.`, true);
+    }
+    if (w?.tempF != null && w.tempF <= 32 && h <= 9) add(0.92, "Freeze", "Assumption −8% when this morning hour is at or below 32°F (original board).", true);
+    const hot = (w?.tempF != null && w.tempF >= 95) || (day?.high >= 90);
+    if (hot && h >= 11 && h <= 18) {
+      if (heatLearn?.learned) add(heatLearn.effect, "Heat", `Learned from your sales: hot days run ${pctTxt(heatLearn.effect)} vs milder days.`, false);
+      else add(1.03, "Heat", "Assumption +3% when the hour is at least 95°F or the day's high is at least 90°F. Not measured here.", true);
+    }
+  }
   if (!why.length) return null;
-  return { factor: f, app, label: `${Math.round(w.tempF)}° · ${pop}% rain${w.short ? ` · ${w.short}` : ""}`, detail: `${why.join("; ")} (${w.src})` };
+  const bits = [];
+  if (w?.tempF != null) bits.push(`${Math.round(w.tempF)}°`);
+  bits.push(`${pop}% rain`);
+  if (inches != null) bits.push(`${inches.toFixed(2)} in`);
+  if (w?.short) bits.push(w.short);
+  return { factor: f, app, adjustments, label: bits.join(" · "), detail: `${why.join("; ")}${w?.src ? ` (${w.src})` : ""}` };
 }
 const WMO = { 0:"Clear", 1:"Mostly clear", 2:"Partly cloudy", 3:"Cloudy", 45:"Fog", 48:"Fog", 51:"Drizzle", 53:"Drizzle", 55:"Drizzle", 56:"Freezing drizzle", 57:"Freezing drizzle", 61:"Light rain", 63:"Rain", 65:"Heavy rain", 66:"Freezing rain", 67:"Freezing rain", 71:"Light snow", 73:"Snow", 75:"Heavy snow", 77:"Snow", 80:"Showers", 81:"Showers", 82:"Heavy showers", 85:"Snow showers", 86:"Snow showers", 95:"Thunderstorms", 96:"Storms, hail", 99:"Storms, hail" };
+function nwsHeaders() {
+  const headers = { Accept: "application/geo+json" };
+  if (typeof navigator === "undefined") headers["User-Agent"] = "BoWatch/1.0 (Chelsea AL line board; https://github.com/wiggywig1066-rgb/Bowatch)";
+  return headers;
+}
 export async function fetchWeather(fetchFn = fetch) {
-  const byHour = {}, byDay = {}, sources = [];
+  const byHour = {}, byDay = {}, sources = []; let alerts = [];
   try {
-    const u = `https://api.open-meteo.com/v1/forecast?latitude=${STORE.lat}&longitude=${STORE.lng}&hourly=temperature_2m,precipitation_probability,weather_code&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&temperature_unit=fahrenheit&timezone=${encodeURIComponent(TZ)}&forecast_days=16`;
+    const u = `https://api.open-meteo.com/v1/forecast?latitude=${STORE.lat}&longitude=${STORE.lng}&hourly=temperature_2m,precipitation_probability,precipitation,weather_code&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,weather_code&temperature_unit=fahrenheit&precipitation_unit=inch&timezone=${encodeURIComponent(TZ)}&forecast_days=16`;
     const r = await fetchFn(u); if (!r.ok) throw new Error(`Open-Meteo ${r.status}`);
     const j = await r.json();
-    j.hourly.time.forEach((t, i) => { byHour[`${t.slice(0,10)}|${Number(t.slice(11,13))}`] = { tempF: j.hourly.temperature_2m[i], pop: j.hourly.precipitation_probability[i] ?? 0, code: j.hourly.weather_code[i], src: "Open-Meteo" }; });
-    j.daily.time.forEach((t, i) => { byDay[t] = { high: Math.round(j.daily.temperature_2m_max[i]), low: Math.round(j.daily.temperature_2m_min[i]), rain: j.daily.precipitation_probability_max[i] ?? 0, summary: WMO[j.daily.weather_code[i]] ?? "", src: "Open-Meteo" }; });
+    j.hourly.time.forEach((t, i) => { byHour[`${t.slice(0,10)}|${Number(t.slice(11,13))}`] = { tempF: j.hourly.temperature_2m[i], pop: j.hourly.precipitation_probability[i] ?? 0, precipIn: j.hourly.precipitation?.[i] ?? null, code: j.hourly.weather_code[i], src: "Open-Meteo" }; });
+    j.daily.time.forEach((t, i) => { byDay[t] = { high: Math.round(j.daily.temperature_2m_max[i]), low: Math.round(j.daily.temperature_2m_min[i]), rain: j.daily.precipitation_probability_max[i] ?? 0, precipIn: j.daily.precipitation_sum?.[i] ?? null, summary: WMO[j.daily.weather_code[i]] ?? "", src: "Open-Meteo" }; });
     sources.push("Open-Meteo");
   } catch (e) { sources.push(`Open-Meteo failed: ${e.message}`); }
-  try { // NWS hourly overrides the first ~7 days (official forecast for this grid point)
-    const pts = await (await fetchFn(`https://api.weather.gov/points/${STORE.lat},${STORE.lng}`, { headers: { Accept: "application/geo+json" } })).json();
-    const hr = await fetchFn(pts.properties.forecastHourly, { headers: { Accept: "application/geo+json" } }); if (!hr.ok) throw new Error(`NWS ${hr.status}`);
+  try { // NWS hourly overrides temperature, rain chance, and the sky words for ~7 days. Amount stays from Open-Meteo: the NWS hourly product has no precip amount.
+    const pts = await (await fetchFn(`https://api.weather.gov/points/${STORE.lat},${STORE.lng}`, { headers: nwsHeaders() })).json();
+    const hr = await fetchFn(pts.properties.forecastHourly, { headers: nwsHeaders() }); if (!hr.ok) throw new Error(`NWS ${hr.status}`);
     const hourly = await hr.json(); let n = 0;
     for (const p of hourly.properties.periods) {
       const { dateKey, hour } = chicagoNow(new Date(p.startTime)), k = `${dateKey}|${hour}`, prev = byHour[k];
-      byHour[k] = { tempF: p.temperature, pop: p.probabilityOfPrecipitation?.value ?? prev?.pop ?? 0, code: prev?.code, short: p.shortForecast, src: "NWS" }; n++;
+      byHour[k] = { tempF: p.temperature, pop: p.probabilityOfPrecipitation?.value ?? prev?.pop ?? 0, precipIn: prev?.precipIn ?? null, code: prev?.code, short: p.shortForecast, src: prev ? "NWS + Open-Meteo amount" : "NWS" }; n++;
     }
     if (n) sources.push("NWS hourly");
   } catch (e) { sources.push(`NWS failed: ${e.message}`); }
-  return { byHour, byDay, sources, fetchedAt: new Date().toISOString(), ok: Object.keys(byHour).length > 0 };
+  try {
+    const ar = await fetchFn("https://api.weather.gov/alerts/active?zone=ALC117,ALZ025", { headers: nwsHeaders() });
+    if (!ar.ok) throw new Error(`NWS alerts ${ar.status}`);
+    const aj = await ar.json();
+    alerts = (aj.features || []).map(f => f.properties || {}).filter(p => p.event).map(p => ({ event: p.event, severity: p.severity || "", headline: p.headline || "", onset: p.onset || null, ends: p.ends || null, instruction: p.instruction || "" }));
+    sources.push(alerts.length ? `NWS alerts: ${alerts.map(a => a.event).join(", ")}` : "NWS alerts (Shelby County, none active)");
+  } catch (e) { sources.push(`NWS alerts failed: ${e.message}`); }
+  for (const [k, w] of Object.entries(byHour)) {
+    const date = k.slice(0, 10), day = byDay[date]; if (!day) continue;
+    if (w.pop != null) day.rain = Math.max(day.rain || 0, w.pop);
+  }
+  return { byHour, byDay, alerts, sources, fetchedAt: new Date().toISOString(), ok: Object.keys(byHour).length > 0 };
 }
 
 // Past daily weather for learning a rain effect from sales history (Open-Meteo archive, ~5-day lag).
@@ -421,28 +513,149 @@ export function dayShape(d, school = d >= 1 && d <= 5) {
   const s = { arr, sum: arr.reduce((a, b) => a + b, 0) }; SHAPES.set(k, s); return s;
 }
 
-// Multipliers a weekday baseline can't know. Learned uplift corrections (from daily totals) and a
-// learned rain effect replace or adjust the defaults when present.
-function multsFor(dateKey, h, ctx) {
-  const { cal, weather, uplift, wxLearn } = ctx, d = dow(dateKey), weekday = d >= 1 && d <= 5, school = cal.isSchoolDay(dateKey), mults = [];
-  if (weekday && !school && cal.hasSchoolData) {
-    if (h >= 9 && h < 15) mults.push([1.10, "school", "No school today", "Kids and parents out midday (Shelby County Schools calendar)."]);
-    if (h >= 6 && h < 8) mults.push([0.95, "school", "No school today", "Lighter drop-off rush."]);
-  }
-  if (school && cal.isEarly(dateKey) && h >= 12 && h < 14) mults.push([1.08, "school", "Early dismissal 1 PM", "Shelby County Schools early release."]);
-  if (Number(dateKey.slice(8)) === 1 && h >= 11 && h < 20) mults.push([1.04, "payday", "First of the month", "Benefit and monthly-bill payday."]);
-  for (const e of cal.eventsOn(dateKey)) if (h >= e.start && h < e.end) mults.push([e.lift, e.kind || "local", e.label, e.detail || "", e.source]);
-  if (uplift) for (const k of dayKinds(dateKey, cal)) { const f = uplift.factors[k]; if (f?.learned) mults.push([f.factor, k === "noschool" ? "school" : k, `Learned from your sales: ${UPLIFT_NAMES[k] || k} days`, `${k === "noschool" ? "No-school weekdays" : `${UPLIFT_NAMES[k] || k} days`} ran ${pctTxt(f.factor)} vs what the default lifts predicted (median of ${f.n} days in your data). Applied to the whole day.`]); }
-  const w = weatherFactor(weather?.byHour?.[`${dateKey}|${h}`], weather?.byDay?.[dateKey], h, wxLearn);
-  if (w) mults.push([w.factor, "weather", w.label, w.detail, null, w.app]);
-  return mults;
-}
 const pctTxt = f => `${f >= 1 ? "+" : "−"}${Math.abs(Math.round((f - 1) * 100))}%`;
-export const UPLIFT_NAMES = { holiday:"Holiday", sports:"High school sports", college:"College football", local:"Local event", retail:"Retail", school:"School event", noschool:"No-school" };
+export const UPLIFT_NAMES = { holiday:"Holiday", sports:"High school sports", college:"College football", local:"Local event", retail:"Retail", school:"School event", noschool:"No-school", promo:"Promotion" };
+const SSA_SOURCE = "https://www.ssa.gov/pubs/calendar.htm";
+const SSA_RULE = "https://www.ssa.gov/kc/rp_paybenefits.htm";
+const NIST_DST = "https://www.nist.gov/pml/time-and-frequency-division/popular-links/daylight-saving-time";
+const SNAP_SOURCE = "https://fns-prod.azureedge.us/sites/default/files/resource-files/Monthly-Issuance-Schedule-All-States.pdf";
+export const FEDERAL_HOLIDAYS = ["2025-01-01","2025-01-20","2025-02-17","2025-05-26","2025-06-19","2025-07-04","2025-09-01","2025-10-13","2025-11-11","2025-11-27","2025-12-25","2026-01-01","2026-01-19","2026-02-16","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-10-12","2026-11-11","2026-11-26","2026-12-25","2027-01-01","2027-01-18","2027-02-15","2027-05-31","2027-06-18","2027-07-05","2027-09-06","2027-10-11","2027-11-11","2027-11-25","2027-12-24"];
+function holidaySet(extra) { return extra instanceof Set ? extra : new Set(FEDERAL_HOLIDAYS); }
+function isBusinessDay(k, hol) { const d = dow(k); return d !== 0 && d !== 6 && !hol.has(k); }
+function prevBusinessDay(k, hol) { let x = k; for (let i = 0; i < 12 && !isBusinessDay(x, hol); i++) x = addDays(x, -1); return x; }
+export function nthWeekdayOfMonth(year, month, weekday, n) {
+  let count = 0;
+  for (let day = 1; day <= 31; day++) {
+    const dt = new Date(Date.UTC(year, month - 1, day));
+    if (dt.getUTCMonth() !== month - 1) break;
+    const k = `${year}-${pad(month)}-${pad(day)}`;
+    if (dow(k) === weekday) { count++; if (count === n) return k; }
+  }
+  return null;
+}
+export function dstTransition(dateKey) {
+  const y = Number(dateKey.slice(0, 4));
+  if (dateKey === nthWeekdayOfMonth(y, 3, 0, 2)) return "spring";
+  if (dateKey === nthWeekdayOfMonth(y, 11, 0, 1)) return "fall";
+  return null;
+}
+export function snapIssuance(dateKey) {
+  const day = Number(dateKey.slice(8));
+  if (day < 4 || day > 23) return null;
+  const start = (day - 4) * 5, end = start + 4;
+  const digits = `${String(start).padStart(2, "0")}–${String(end).padStart(2, "0")}`;
+  return { id:"snap", label:"SNAP issuance", pct:0, assumption:true, source:SNAP_SOURCE, detail:`Alabama SNAP is issued on the 4th–23rd by the last two digits of the case number. This date is for cases ending ${digits}. No percent is added: the city is split across 20 days, and this store has no SNAP data.` };
+}
+export function socialSecurity(dateKey) {
+  const hol = holidaySet(), y = Number(dateKey.slice(0, 4)), m = Number(dateKey.slice(5, 7)), notes = [];
+  const add = (id, label, when) => notes.push({ id, label, pct:0, assumption:true, source:SSA_SOURCE, detail: dateKey === when ? `${label} lands on this day (${SSA_RULE}). No percent is added — it is not measured at this store.` : `${label} is scheduled for ${when}, a weekend or federal holiday, so SSA pays on this day. No percent is added.` });
+  const consider = (when, id, label) => { if (when && dateKey === prevBusinessDay(when, hol)) add(id, label, when); };
+  const next = m === 12 ? [y + 1, 1] : [y, m + 1];
+  consider(`${dateKey.slice(0, 7)}-01`, "ssi", "SSI payment");
+  consider(`${next[0]}-${pad(next[1])}-01`, "ssi-next", "SSI payment");
+  consider(`${dateKey.slice(0, 7)}-03`, "ss-3", "Social Security (the 3rd)");
+  consider(`${next[0]}-${pad(next[1])}-03`, "ss-3-next", "Social Security (the 3rd)");
+  for (const [yy, mm] of [[y, m]]) {
+    for (const [n, name] of [[2, "2nd Wednesday"], [3, "3rd Wednesday"], [4, "4th Wednesday"]]) consider(nthWeekdayOfMonth(yy, mm, 3, n), `ss-${n}`, `Social Security (${name})`);
+  }
+  return notes;
+}
+export function dayContext(dateKey) {
+  const notes = [];
+  const dst = dstTransition(dateKey);
+  if (dst === "spring") notes.push({ id:"dst", label:"Clocks spring forward", pct:-3, assumption:true, source:NIST_DST, detail:"Daylight saving time starts at 2 AM on the second Sunday in March. The first two open hours use a −3% prior." });
+  if (dst === "fall") notes.push({ id:"dst", label:"Clocks fall back", pct:0, assumption:true, source:NIST_DST, detail:"Daylight saving time ends at 2 AM on the first Sunday in November. No percent is applied." });
+  const snap = snapIssuance(dateKey); if (snap) notes.push(snap);
+  notes.push(...socialSecurity(dateKey));
+  return notes;
+}
+const CAL_RULES = [
+  { id:"month-start", label:"1st payday", kind:"payday", factor:1.04, test:k => Number(k.slice(8)) === 1, hours:(k, h) => h >= 11 && h < 20, source:SSA_SOURCE, detail:"Assumption: deposits and monthly bills on the 1st. Same +4% prior the board already used, 11 AM–8 PM. Your own 1sts correct it once 3 comparable days are in the file." },
+  { id:"mid-month", label:"15th payday", kind:"payday", factor:1.04, test:k => Number(k.slice(8)) === 15, hours:(k, h) => h >= 11 && h < 20, source:null, detail:"Assumption: a 15th paycheck bump, same +4% prior as the 1st, 11 AM–8 PM. Not measured here until 3 or more 15ths are in the file." },
+  { id:"month-end", label:"Month-end", kind:"payday", factor:1.03, test:k => addDays(k, 1).slice(8) === "01", hours:(k, h) => h >= 11 && h < 20, source:null, detail:"Assumption: +3% on the last calendar day, 11 AM–8 PM. Not measured at this store." },
+  { id:"dst-spring", label:"Clocks spring forward", kind:"calendar", factor:0.97, test:k => dstTransition(k) === "spring", hours:(k, h) => h < HOURS[dow(k)].open + 2, source:NIST_DST, detail:"Assumption: −3% on the first two open hours after the 2 AM spring-forward. Not measured here." },
+];
+function defaultCalLift(k, rule) {
+  const s = dayShape(dow(k)); let num = 0;
+  for (let h = 0; h < 24; h++) { if (!s.arr[h]) continue; num += s.arr[h] * (rule.test(k) && rule.hours(k, h) ? rule.factor : 1); }
+  return s.sum ? num / s.sum : 1;
+}
+export function learnCalendar(totals, { asOf, weeks = 8, cal } = {}) {
+  const excl = excludedDates(cal), out = {};
+  for (const rule of CAL_RULES) {
+    const samples = [];
+    for (const [k, t] of totals) {
+      if (k >= asOf || !(t.tickets > 0) || !rule.test(k)) continue;
+      const { med } = weekdayMedian(totals, k, weeks, excl); if (!med) continue;
+      samples.push(t.tickets / med / defaultCalLift(k, rule));
+    }
+    out[rule.id] = { id:rule.id, label:rule.label, n:samples.length, factor: samples.length ? clamp(median(samples), 0.5, 1.6) : null, learned: samples.length >= UPLIFT_MIN_DAYS };
+  }
+  return out;
+}
+export function learnHeat(totals, wxHist, cal, { asOf, weeks = 8, minHot = 4, minMild = 8 } = {}) {
+  if (!wxHist?.byDay || !Object.values(wxHist.byDay).some(w => w && w.tmax != null)) return { learned:false, reason:"Past weather has no daily high temperature, so a heat effect was not tested." };
+  const excl = excludedDates(cal), hot = [], mild = [];
+  for (const [k, t] of totals) {
+    if (k >= asOf || excl.has(k) || !(t.tickets > 0)) continue;
+    const w = wxHist.byDay[k]; if (!w || w.tmax == null) continue;
+    const { med } = weekdayMedian(totals, k, weeks, excl); if (!med) continue;
+    const lr = Math.log(t.tickets / med);
+    if (w.tmax >= 90) hot.push(lr); else if (w.tmax <= 75) mild.push(lr);
+  }
+  const base = { nHot: hot.length, nMild: mild.length };
+  if (hot.length < minHot || mild.length < minMild) return { learned:false, ...base, reason:`Only ${hot.length} hot days (high ≥90°F) and ${mild.length} milder days (high ≤75°F) with a baseline — need ${minHot} and ${minMild}. The +3% heat prior stays.` };
+  const mean = a => a.reduce((s, v) => s + v, 0) / a.length, vr = a => { const m = mean(a); return a.reduce((s, v) => s + (v - m) ** 2, 0) / Math.max(1, a.length - 1); };
+  const diff = mean(hot) - mean(mild), se = Math.sqrt(vr(hot) / hot.length + vr(mild) / mild.length), tstat = se ? diff / se : 0, effect = Math.exp(diff);
+  if (Math.abs(tstat) < 2 || Math.abs(effect - 1) < 0.03) return { learned:false, ...base, effect, t:tstat, reason:`Hot days ran ${pctTxt(effect)} vs milder days, but it isn't clear (t = ${tstat.toFixed(1)}). The +3% heat prior stays.` };
+  return { learned:true, ...base, effect, t:tstat, reason:`Hot days (high ≥90°F) ran ${pctTxt(effect)} vs milder days (${hot.length} hot, ${mild.length} mild, t = ${tstat.toFixed(1)}).` };
+}
+function eventAdjLabel(e) {
+  const l = e.label || "";
+  if (e.kind === "sports") {
+    if (/\(home\)|\bvs\b/i.test(l) && !/\bat\b/i.test(l)) return "Home game";
+    if (/\bat\b/i.test(l) && !/\(home\)/i.test(l)) return "Away game";
+    return "Game day";
+  }
+  if (e.kind === "college") return "College game";
+  if (e.kind === "holiday") return (l.split("—")[0] || "Holiday").trim().slice(0, 28);
+  if (e.kind === "retail") return (l.split(",")[0] || "Retail").trim().slice(0, 24);
+  if (e.kind === "local") return "Local event";
+  return "Event";
+}
+function multsFor(dateKey, h, ctx) {
+  const { cal, weather, uplift, wxLearn, heatLearn, calendar } = ctx;
+  const d = dow(dateKey), weekday = d >= 1 && d <= 5, school = cal.isSchoolDay(dateKey);
+  const mults = [], adjustments = [];
+  const push = (factor, kind, label, detail, opt = {}) => {
+    const f = factor || 1;
+    if (opt.multiply !== false && f !== 1) mults.push([f, kind, label, detail, opt.source || null, opt.app || 0]);
+    if (opt.why === false) return;
+    adjustments.push({ label, pct: Math.round((f - 1) * 100), assumption: opt.assumption !== false, detail, source: opt.source || null, kind, why: true, alreadyInBaseline: !!opt.alreadyInBaseline });
+  };
+  if (weekday && !school && cal.hasSchoolData) {
+    if (h >= 9 && h < 15) push(1.10, "school", "No school", "Assumption +10% midday when Shelby County Schools is closed. Kids and parents are out.", { assumption:true });
+    if (h >= 6 && h < 8) push(0.95, "school", "No school", "Assumption −5% on the drop-off hour when school is out.", { assumption:true });
+  }
+  if (school && cal.isEarly(dateKey) && h >= 12 && h < 14) push(1.08, "school", "Early release", "Assumption +8% at lunch on a Shelby County early-dismissal day.", { assumption:true });
+  for (const rule of CAL_RULES) {
+    if (!rule.test(dateKey)) continue;
+    if (rule.hours(dateKey, h)) push(rule.factor, rule.kind, rule.label, rule.detail, { assumption:true, source:rule.source });
+    const learned = calendar?.[rule.id];
+    if (learned?.learned && learned.factor) push(learned.factor, rule.kind, `Learned ${rule.label}`, `Your ${rule.label.toLowerCase()} days ran ${pctTxt(learned.factor)} versus the prior (median of ${learned.n} days). Applied on top of that prior.`, { assumption:false });
+  }
+  for (const e of cal.eventsOn(dateKey)) if (h >= e.start && h < e.end && e.lift != null && e.forecast !== false) {
+    push(e.lift, e.kind || "local", eventAdjLabel(e), `${e.label}. ${e.detail || ""}${e.assumption === false ? "" : " Starting guess until your sales cover this kind of day."}`, { assumption: e.assumption !== false, source: e.source });
+  }
+  if (uplift) for (const k of dayKinds(dateKey, cal)) { const f = uplift.factors[k]; if (f?.learned) push(f.factor, k === "noschool" ? "school" : k, `Learned ${UPLIFT_NAMES[k] || k}`, `${k === "noschool" ? "No-school weekdays" : `${UPLIFT_NAMES[k] || k} days`} ran ${pctTxt(f.factor)} vs what the default lifts predicted (median of ${f.n} days). Applied to the whole day.`, { assumption:false }); }
+  const w = weatherFactor(weather?.byHour?.[`${dateKey}|${h}`], weather?.byDay?.[dateKey], h, wxLearn, { heatLearn, alerts: weather?.alerts, dateKey });
+  if (w) { mults.push([w.factor, "weather", w.label, w.detail, null, w.app]); adjustments.push(...w.adjustments); }
+  return { mults, adjustments };
+}
 
 function hourModel(dateKey, h, ctx) {
   const d = dow(dateKey), hrs = HOURS[d], wd = WD[d];
-  if (h < hrs.open || h >= hrs.close || ctx.closedDates.has(dateKey)) return { hour:h, dateKey, weekdayShort:wd, open:false, score:0, popularity:0, tickets:0, appLoad:0, drivers:[], ...band(0) };
+  if (h < hrs.open || h >= hrs.close || ctx.closedDates.has(dateKey)) return { hour:h, dateKey, weekdayShort:wd, open:false, score:0, popularity:0, tickets:0, appLoad:0, drivers:[], adjustments:[], why:"Closed.", vsNormal:1, sampleN:0, ...band(0) };
   const { cal, learned, daily } = ctx, drivers = [];
   const school = cal.isSchoolDay(dateKey);
   let tickets, appLoad = 0, mult = 1;
@@ -463,12 +676,24 @@ function hourModel(dateKey, h, ctx) {
     drivers.push({ kind:"baseline", label:"Typical Bojangles rhythm (estimated curve)", detail: DAY_NOTES[d], pct:0 }, ...r.drivers);
     tickets = r.pop * TICKETS_PER_POINT; appLoad = r.app;
   }
-  for (const [f, kind, label, detail, source, app] of multsFor(dateKey, h, ctx)) { mult *= f; appLoad += app || 0; drivers.push({ kind, label, detail, pct: Math.round((f - 1) * 100), source }); }
+  const built = multsFor(dateKey, h, ctx);
+  let adjustments = built.adjustments;
+  for (const [f, kind, label, detail, source, app] of built.mults) { mult *= f; appLoad += app || 0; drivers.push({ kind, label, detail, pct: Math.round((f - 1) * 100), source }); }
+  if (d === 5 && h >= 11 && h < 20) {
+    if (!learned && !daily) {
+      const rule = WEEKLY.find(r => r.kind === "payday" && r.days.includes(5));
+      const basePop = CURVES[d][h] || 20;
+      const pct = Math.round(((rule?.delta || 0) / basePop) * 100);
+      adjustments = adjustments.concat([{ label:"Friday payday", pct, assumption:true, alreadyInBaseline:true, kind:"payday", why:true, detail:`Part of the usual Friday shape: the original board adds +${rule?.delta || 0} popularity points here, about ${pct}% of the plain curve. Assumption, not measured at this store.` }]);
+    } else adjustments = adjustments.concat([{ label:"Friday payday", pct:0, assumption:true, alreadyInBaseline:true, kind:"payday", why:true, detail:"Your Friday baseline already includes payday Fridays, so this hour is not lifted again." }]);
+  }
   tickets *= mult;
-  // Score: estimate mode keeps the original 0-100 index; data modes map this store's 95th-pct hour to ~85.
   const popularity = clamp(learned || daily ? tickets / ctx.posRef * 85 : tickets / TICKETS_PER_POINT, 4, 100);
   const score = clamp(Math.round(popularity / 10), 1, 10);
-  return { hour:h, dateKey, weekdayShort:wd, open:true, popularity, score, tickets, appLoad, school, drivers: drivers.filter(x => x.kind !== "baseline" || drivers.length === 1 || learned || daily), ...band(score) };
+  const sampleN = learned ? learned.samples[d][h] : daily ? daily.samples[d] : 0;
+  const hour = { hour:h, dateKey, weekdayShort:wd, open:true, popularity, score, tickets, appLoad, school, adjustments, vsNormal:mult, sampleN, drivers: drivers.filter(x => x.kind !== "baseline" || drivers.length === 1 || learned || daily), ...band(score) };
+  hour.why = explainHour(hour);
+  return hour;
 }
 
 export function headline(day) {
@@ -482,6 +707,36 @@ export function headline(day) {
 }
 
 export const SPREAD = { estimate: 0.25, daily: 0.18, pos: 0.15 };
+export function uncertaintyBand({ mode = "estimate", samples = 0, p80 = null } = {}) {
+  const prior = SPREAD[mode] ?? 0.25;
+  if (p80 != null && Number.isFinite(p80) && p80 > 0) {
+    const spread = clamp(p80, 0.08, 0.45);
+    return { spread, basis:"backtest", assumption:false, samples, p80, detail:`The band is the 80th percentile of absolute percent error on the walk-forward backtest (${Math.round(p80 * 100)}%).` };
+  }
+  const n = Number(samples) || 0;
+  if (mode === "estimate" || n < 4) return { spread: prior, basis:"assumption", assumption:true, samples:n, p80:null, detail:`±${Math.round(prior * 100)}% is a starting assumption${mode === "estimate" ? " until sales are loaded" : ""}. It narrows once a backtest, or at least 4 samples, is available.` };
+  const floor = mode === "pos" ? 0.08 : 0.10;
+  const spread = clamp(prior * Math.sqrt(4 / n), floor, prior);
+  return { spread, basis:"samples", assumption:true, samples:n, p80:null, detail:`Narrowed from ±${Math.round(prior * 100)}% using about ${Math.round(n)} baseline samples. Still a prior until the backtest replaces it.` };
+}
+export function hourBand(baseSpread, sampleN, basis) {
+  if (basis === "backtest" || !(sampleN >= 4)) return baseSpread;
+  return clamp(baseSpread * Math.sqrt(4 / sampleN), 0.08, baseSpread);
+}
+export function explainHour(x) {
+  const parts = (x?.adjustments || []).filter(a => a.why !== false).map(a => {
+    const pct = Math.round(a.pct || 0), sign = pct > 0 ? "+" : pct < 0 ? "−" : "+";
+    return `${a.label} ${sign}${Math.abs(pct)}%`;
+  });
+  if (!parts.length) return "No weather, payday, or event adjustment. A normal hour for this weekday.";
+  return parts.join(", ");
+}
+function dowShares(values) { const m = values.reduce((a, b) => a + b, 0) / values.length; return values.map(v => m ? v / m : 1); }
+function typicalSamples(mode, learned, dl) {
+  if (mode === "pos" && learned) { const v = learned.samples.flat().filter(n => n > 0); return v.length ? median(v) : 0; }
+  if (mode === "daily" && dl) { const v = dl.samples.filter(n => n > 0); return v.length ? median(v) : 0; }
+  return 0;
+}
 
 // pos = parsed hourly POS (parsePOS), daily = parsed daily CSV (parseDaily), wxHist = past daily weather
 // ({ byDay: { "YYYY-MM-DD": { precip, tmax } } }) for learning a rain effect.
@@ -495,6 +750,8 @@ export function forecast({ now = new Date(), cal, pos = null, daily = null, wxHi
   const dl = totals && !useLearned ? learnDaily(totals, { asOf: c.dateKey, weeks, cal }) : null;
   const uplift = totals ? learnUplifts(totals, cal, { asOf: c.dateKey, weeks }) : null;
   const wxLearn = totals ? learnWeather(totals, wxHist, cal, { asOf: c.dateKey, weeks }) : null;
+  const heatLearn = totals ? learnHeat(totals, wxHist, cal, { asOf: c.dateKey, weeks }) : null;
+  const calendar = totals ? learnCalendar(totals, { asOf: c.dateKey, weeks, cal }) : null;
   const dRatios = daily ? learnDailyRatios(daily) : null;
   const mode = useLearned ? "pos" : dl ? "daily" : "estimate";
   let baseVals = [];
@@ -503,7 +760,7 @@ export function forecast({ now = new Date(), cal, pos = null, daily = null, wxHi
   baseVals.sort((a, b) => a - b);
   const posRef = baseVals.length ? Math.max(1, baseVals[Math.floor(0.95 * (baseVals.length - 1))]) : 1;
   const closedDates = new Set(cal.events.filter(e => e.closed).map(e => e.date));
-  const ctx = { cal, learned: useLearned, daily: mode === "daily" ? dl : null, weather, posRef, closedDates, uplift, wxLearn: wxLearn?.learned ? wxLearn : null };
+  const ctx = { cal, learned: useLearned, daily: mode === "daily" ? dl : null, weather, posRef, closedDates, uplift, calendar, wxLearn: wxLearn?.learned ? wxLearn : null, heatLearn: heatLearn?.learned ? heatLearn : null };
   const out = [];
   for (let i = 0; i < days; i++) {
     const key = addDays(c.dateKey, i), d = dow(key), hours = [];
@@ -513,7 +770,7 @@ export function forecast({ now = new Date(), cal, pos = null, daily = null, wxHi
     const deadest = open.length ? open.reduce((a, b) => b.score < a.score ? b : a) : null;
     const day = { dateKey:key, weekday:d, weekdayLong:WDL[d], weekdayShort:WD[d], monthDay:monthDay(key), isToday:i === 0, openHour:HOURS[d].open, closeHour:HOURS[d].close,
       hours, peak, deadest, dayScore: open.length ? Math.round(open.reduce((s, x) => s + x.score, 0) / open.length) : 0,
-      weather: weather?.byDay?.[key] ?? null, events: cal.eventsOn(key), schoolDay: cal.isSchoolDay(key) };
+      weather: weather?.byDay?.[key] ?? null, events: cal.eventsOn(key), schoolDay: cal.isSchoolDay(key), context: dayContext(key) };
     day.headline = headline(day);
     out.push(day);
   }
@@ -521,9 +778,13 @@ export function forecast({ now = new Date(), cal, pos = null, daily = null, wxHi
   const later = [...today.hours.filter(x => x.hour > c.hour && x.open), ...out.slice(1).flatMap(d => d.hours.filter(x => x.open))];
   let ratios = useLearned ? useLearned.ratios : DEFAULT_RATIOS;
   if (!useLearned && dRatios?.learned.length) ratios = dRatios.ratios;
+  const samples = typicalSamples(mode, useLearned, dl);
+  const shares = mode === "pos" && useLearned ? dowShares(useLearned.base.map(day => day.reduce((s, v) => s + (v || 0), 0)))
+    : dl ? dowShares(dl.base) : dowShares([0, 1, 2, 3, 4, 5, 6].map(d => dayShape(d).sum));
   return { generatedAt: now.toISOString(), dateKey: c.dateKey, hour: c.hour, minute: c.minute, current: cur, days: out,
     nextDead: later.find(x => x.key === "dead" || x.key === "slow") ?? null, nextBusy: later.find(x => x.key === "busy" || x.key === "packed") ?? null,
-    mode, spread: SPREAD[mode], learned: useLearned, dailyLearned: dl, dailyInsufficient: !!(daily && !dl && !useLearned), uplift, wxLearn, dailyRatios: dRatios,
+    mode, spread: SPREAD[mode], uncertainty: uncertaintyBand({ mode, samples }), dowShares: shares, dowSharesAssumption: mode === "estimate",
+    learned: useLearned, dailyLearned: dl, dailyInsufficient: !!(daily && !dl && !useLearned), uplift, wxLearn, heatLearn, calendar, dailyRatios: dRatios,
     posInsufficient: !!(learned && !useLearned), ratios };
 }
 
@@ -604,6 +865,6 @@ export function backtest(pos, cal, { days = 28, weeks = 8 } = {}) {
         const p = partOf(h); (err[m][p] ??= []).push(Math.abs(x.tickets - a) / a); }
     }
   }
-  const sum = o => Object.fromEntries(Object.entries(o).map(([p, e]) => [p, { mape: e.reduce((s, v) => s + v, 0) / e.length, n: e.length }]));
-  return { dates: dates.length, pos: sum(err.pos), estimate: sum(err.estimate) };
+  const sum = o => Object.fromEntries(Object.entries(o).map(([p, e]) => [p, errSummary(e)]));
+  return { dates: dates.length, pos: sum(err.pos), estimate: sum(err.estimate), overall: { pos: errSummary(Object.values(err.pos).flat()), estimate: errSummary(Object.values(err.estimate).flat()) } };
 }
